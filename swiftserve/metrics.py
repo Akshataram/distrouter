@@ -90,6 +90,14 @@ REPLICA_CIRCUIT_STATE = Gauge(
     registry=REGISTRY,
 )
 
+REPLICA_BATCH_CAPACITY = Gauge(
+    "swiftserve_replica_batch_capacity",
+    "Effective continuous-batching capacity per replica, learned from the "
+    "highest concurrency actually observed via scraped vLLM metrics.",
+    ["replica_id"],
+    registry=REGISTRY,
+)
+
 _CIRCUIT_STATE_VALUE = {"closed": 0, "half_open": 1, "open": 2}
 
 
@@ -121,6 +129,7 @@ def refresh_replica_gauges(replicas: Iterable) -> None:
         REPLICA_QUEUE_DEPTH.labels(replica_id=rid).set(r.queue_depth())
         REPLICA_EWMA_LATENCY_MS.labels(replica_id=rid).set(r.ewma_latency_ms)
         REPLICA_CIRCUIT_STATE.labels(replica_id=rid).set(_CIRCUIT_STATE_VALUE[r.circuit.state.value])
+        REPLICA_BATCH_CAPACITY.labels(replica_id=rid).set(r.effective_batch_capacity())
 
 
 def render_latest() -> bytes:

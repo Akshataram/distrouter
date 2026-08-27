@@ -41,8 +41,6 @@ def _parse_metrics_text(text: str) -> dict[str, float]:
 
 
 async def scrape_once(client: httpx.AsyncClient, replica: ReplicaState) -> None:
-    import time
-
     try:
         health_resp = await client.get(f"{replica.base_url}/health", timeout=3.0)
         replica.metrics.healthy = health_resp.status_code == 200
@@ -54,10 +52,11 @@ async def scrape_once(client: httpx.AsyncClient, replica: ReplicaState) -> None:
         metrics_resp = await client.get(f"{replica.base_url}/metrics", timeout=3.0)
         if metrics_resp.status_code == 200:
             parsed = _parse_metrics_text(metrics_resp.text)
-            replica.metrics.running = int(parsed.get("running", replica.metrics.running))
-            replica.metrics.waiting = int(parsed.get("waiting", replica.metrics.waiting))
-            replica.metrics.gpu_cache_usage_perc = parsed.get("gpu_cache", replica.metrics.gpu_cache_usage_perc)
-            replica.metrics.last_scraped_monotonic = time.monotonic()
+            replica.record_scrape(
+                running=int(parsed.get("running", replica.metrics.running)),
+                waiting=int(parsed.get("waiting", replica.metrics.waiting)),
+                gpu_cache_usage_perc=parsed.get("gpu_cache", replica.metrics.gpu_cache_usage_perc),
+            )
     except httpx.HTTPError as exc:
         logger.warning("metrics scrape failed for replica %s: %s", replica.replica_id, exc)
 

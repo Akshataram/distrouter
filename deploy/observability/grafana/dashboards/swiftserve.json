@@ -126,6 +126,19 @@
           "legendFormat": "replica {{replica_id}}"
         }
       ]
+    },
+    {
+      "id": 9,
+      "title": "Per-replica learned batch capacity (M/M/c, from observed concurrency)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 22 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "swiftserve_replica_batch_capacity",
+          "legendFormat": "replica {{replica_id}}"
+        }
+      ]
     }
   ]
 }

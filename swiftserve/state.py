@@ -13,6 +13,17 @@ cache affinity is soft state SwiftServe tracks itself: which replica a
 session was last routed to, and how recently -- SwiftServe relies on vLLM's
 own automatic prefix caching (`--enable-prefix-caching`) to actually reuse
 the KV-cache once a session is routed back to the same replica.
+
+`estimate_latency_ms()` models the replica as an M/M/c queue rather than
+M/M/1: vLLM's continuous batching processes up to `c` requests concurrently
+in the same forward passes, so a request arriving with room in the batch
+finishes in roughly its own service time regardless of how many others are
+already running, and only queues behind others once the batch is actually
+full. `c` (`effective_batch_capacity`) is not guessed -- it is the highest
+concurrency this replica has actually been observed running (a high-water
+mark from scraped vLLM metrics, seeded by a configurable floor that
+defaults to 1), so the model self-calibrates from real telemetry instead of
+requiring the deployer to know vLLM's `--max-num-seqs` in advance.
 """
 
 from __future__ import annotations
@@ -46,6 +57,7 @@ class ReplicaState:
         circuit_failure_threshold: int = 5,
         circuit_reset_timeout_s: float = 10.0,
         circuit_max_reset_timeout_s: float = 120.0,
+        assumed_max_batch_size: int = 1,
     ):
         self.replica_id = replica_id
         self.base_url = base_url
@@ -53,6 +65,8 @@ class ReplicaState:
         self.in_flight = 0
         self.metrics = ScrapedMetrics()
         self.ewma_latency_ms = seed_latency_ms
+        self.max_batch_size = assumed_max_batch_size
+        self._observed_max_concurrency = 0
         self.circuit = CircuitBreaker(
             failure_threshold=circuit_failure_threshold,
             reset_timeout_s=circuit_reset_timeout_s,
@@ -68,14 +82,37 @@ class ReplicaState:
             return max(self.metrics.running + self.metrics.waiting, self.in_flight)
         return self.in_flight
 
+    def effective_batch_capacity(self) -> int:
+        """How many requests this replica can actually run concurrently,
+        best-known: the configured floor, or the highest concurrency ever
+        actually observed via scraped metrics -- whichever is larger. Never
+        shrinks once raised: real capacity doesn't go away because load
+        happened to be low the last time we scraped."""
+        return max(self.max_batch_size, self._observed_max_concurrency, 1)
+
     def estimate_latency_ms(self) -> float:
-        """Projected latency if a request were dispatched here right now:
-        wait behind whatever is already queued, plus this replica's own
-        recently-observed service time."""
-        return self.queue_depth() * self.ewma_latency_ms + self.ewma_latency_ms
+        """Projected latency if a request were dispatched here right now,
+        modeling the replica as an M/M/c queue (c = effective_batch_capacity)
+        rather than M/M/1: below capacity, continuous batching means a new
+        request runs alongside the others at roughly its own service time;
+        at or above capacity, it queues, and slots free up at rate c rather
+        than 1. Setting c=1 (the default until real concurrency is observed)
+        collapses this back to the plain serial-queue estimate."""
+        depth = self.queue_depth()
+        capacity = self.effective_batch_capacity()
+        if depth < capacity:
+            return self.ewma_latency_ms
+        return self.ewma_latency_ms * (depth + 1) / capacity
 
     def record_completion_latency(self, latency_ms: float, alpha: float = 0.2) -> None:
         self.ewma_latency_ms = alpha * latency_ms + (1 - alpha) * self.ewma_latency_ms
+
+    def record_scrape(self, running: int, waiting: int, gpu_cache_usage_perc: float) -> None:
+        self.metrics.running = running
+        self.metrics.waiting = waiting
+        self.metrics.gpu_cache_usage_perc = gpu_cache_usage_perc
+        self.metrics.last_scraped_monotonic = time.monotonic()
+        self._observed_max_concurrency = max(self._observed_max_concurrency, running)
 
     # -- cache affinity heatmap -----------------------------------------
 
@@ -104,6 +141,7 @@ class ReplicaState:
             "scraped_waiting": self.metrics.waiting,
             "gpu_cache_usage_perc": round(self.metrics.gpu_cache_usage_perc, 3),
             "ewma_latency_ms": round(self.ewma_latency_ms, 1),
+            "effective_batch_capacity": self.effective_batch_capacity(),
             "tracked_sessions": len(self._session_last_used),
             "circuit": self.circuit.status(),
         }

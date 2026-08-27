@@ -175,22 +175,51 @@ over per-trial means; a label-shuffle test comparing how often a random
 split of the pooled data reproduces a difference at least as extreme as
 the one observed).
 
+## 7. Batching-aware latency model (`ReplicaState.estimate_latency_ms`)
+
+The project's own earlier honest finding was that `estimate_latency_ms()`
+modeled each replica as a single-server serial queue (`(queue_depth + 1) *
+ewma_latency`, i.e. M/M/1) while real vLLM does continuous batching --
+processing several requests concurrently in the same forward passes -- so
+the estimate over-triggered SLA-based rerouting under concurrency. This is
+now fixed by generalizing the model to M/M/c: below the replica's
+continuous-batching capacity `c`, a new request runs alongside the others
+at roughly its own service time (no queueing penalty at all); at or above
+capacity, it genuinely queues, and slots free up at rate `c` rather than 1,
+giving `ewma_latency * (queue_depth + 1) / c`. Setting `c = 1` reproduces
+the exact original formula, so this is a strict generalization, not a
+behavior change, until real concurrency is actually observed.
+
+`c` (`ReplicaState.effective_batch_capacity()`) is deliberately not a
+number you have to know in advance (vLLM's real usable concurrency for a
+given model/GPU/sequence-length combination is hard to predict from
+`--max-num-seqs` alone, since it also depends on KV-cache memory
+pressure): it is the highest concurrency this replica has actually been
+observed running, a high-water mark updated from the same scraped vLLM
+`/metrics` this project already pulls (`ReplicaState.record_scrape`),
+seeded by a configurable floor (`SWIFTSERVE_ASSUMED_MAX_BATCH_SIZE`,
+default 1) and never allowed to shrink once raised -- real capacity
+doesn't disappear because load happened to be low the last time SwiftServe
+scraped.
+
+**What this model still simplifies, honestly:** it treats `ewma_latency_ms`
+as a single flat per-request service time regardless of current batch
+occupancy, when in reality per-token generation does slow down somewhat as
+more sequences share GPU compute and memory bandwidth concurrently. A
+fully rigorous model would fit latency as a function of batch size rather
+than treating it as constant below capacity. That refinement is future
+work; this upgrade is the first-order fix (serial vs. concurrent), not the
+final word on vLLM's real batching curve.
+
 ## Known limitations (stated, not hidden)
 
-- `estimate_latency_ms()` in `state.py` still assumes serial processing
-  (`(queue_depth + 1) * ewma_latency`) against a vLLM backend that actually
-  does continuous batching -- this is the project's own earlier honest
-  finding about why SwiftServe's SLA-based rerouting over-triggers under
-  concurrency, and it is unchanged by this upgrade. Fixing the estimator
-  itself (e.g. modeling batched throughput rather than a serial queue) is
-  future work, not something this round of hardening addressed.
 - The circuit breaker counts *consecutive* failures rather than a failure
   rate over a sliding window. That's the right tradeoff for vLLM specifically
   (a replica is almost always either fully up or freshly dead, not
   producing a low background error rate), but it is a real simplification
   relative to what a breaker guarding, say, a flaky third-party API would
   need.
-- The half-open probe priority rule (Â§1) always sends the *next* request to
+- The half-open probe priority rule (section 1) always sends the *next* request to
   a recovering replica, with no cap beyond `half_open_max_probes`
   concurrent probes. With more replicas simultaneously recovering than
   `half_open_max_probes`, only one gets probed per request cycle; this
@@ -199,7 +228,7 @@ the one observed).
 
 ## What's actually tested, and how
 
-No test in this repo needs a GPU to run (`pytest -q`, ~47 tests). What
+No test in this repo needs a GPU to run (`pytest -q`, ~53 tests). What
 "real" means varies deliberately by layer, and is worth being explicit
 about defending:
 

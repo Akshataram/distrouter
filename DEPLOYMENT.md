@@ -200,8 +200,12 @@ this is not new-to-you code the first time you run it live.
   set a real token for anything beyond a private demo.
 - `SWIFTSERVE_CIRCUIT_FAILURE_THRESHOLD` / `_CIRCUIT_RESET_S` /
   `_CIRCUIT_MAX_RESET_S` tune the per-replica circuit breaker;
-  `SWIFTSERVE_MAX_IN_FLIGHT` tunes the global admission ceiling. See
-  `ARCHITECTURE.md` for what each actually does.
+  `SWIFTSERVE_MAX_IN_FLIGHT` tunes the global admission ceiling.
+  `SWIFTSERVE_ASSUMED_MAX_BATCH_SIZE` sets the initial floor for each
+  replica's learned continuous-batching capacity (default 1 -- safe/serial
+  until real concurrency is observed; set it higher if you already know
+  roughly what `--max-num-seqs` your replicas can sustain, to skip the
+  learning period). See `ARCHITECTURE.md` for what each actually does.
 - `SWIFTSERVE_CACHE_TTL_S` controls how long SwiftServe keeps believing a
   session's cache is warm on a replica after its last request; tune it
   against how long vLLM's own prefix cache actually stays resident under

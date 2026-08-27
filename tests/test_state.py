@@ -30,3 +30,47 @@ def test_ewma_latency_updates_toward_observed_value():
     r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, seed_latency_ms=1000.0)
     r.record_completion_latency(200.0, alpha=0.5)
     assert r.ewma_latency_ms == 600.0
+
+
+def test_default_batch_capacity_is_one_and_estimate_matches_old_serial_formula():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, seed_latency_ms=100.0)
+    r.in_flight = 4
+    assert r.effective_batch_capacity() == 1
+    # depth=4 >= capacity=1: serial queueing, same as the original (depth+1)*ewma formula.
+    assert r.estimate_latency_ms() == 100.0 * 5
+
+
+def test_below_batch_capacity_has_no_queueing_penalty():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, seed_latency_ms=100.0, assumed_max_batch_size=8)
+    r.in_flight = 5
+    assert r.estimate_latency_ms() == 100.0
+
+
+def test_at_or_above_batch_capacity_queues_at_rate_c():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, seed_latency_ms=100.0, assumed_max_batch_size=4)
+    r.in_flight = 4  # depth == capacity
+    assert r.estimate_latency_ms() == 100.0 * 5 / 4
+    r.in_flight = 8  # depth > capacity
+    assert r.estimate_latency_ms() == 100.0 * 9 / 4
+
+
+def test_observed_concurrency_raises_effective_capacity():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, seed_latency_ms=100.0)
+    r.record_scrape(running=10, waiting=0, gpu_cache_usage_perc=0.5)  # a burst that proves real capacity
+    r.record_scrape(running=3, waiting=0, gpu_cache_usage_perc=0.5)  # current load is lower
+    assert r.effective_batch_capacity() == 10
+    assert r.queue_depth() == 3
+    assert r.estimate_latency_ms() == 100.0  # below the learned capacity of 10, despite the earlier serial default
+
+
+def test_observed_high_water_mark_never_shrinks():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600)
+    r.record_scrape(running=20, waiting=0, gpu_cache_usage_perc=0.5)
+    r.record_scrape(running=2, waiting=0, gpu_cache_usage_perc=0.1)
+    assert r.effective_batch_capacity() == 20
+
+
+def test_configured_floor_can_exceed_observed_concurrency():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, assumed_max_batch_size=16)
+    r.record_scrape(running=3, waiting=0, gpu_cache_usage_perc=0.1)
+    assert r.effective_batch_capacity() == 16

@@ -40,6 +40,7 @@ replicas: list[ReplicaState] = [
         circuit_failure_threshold=settings.circuit_failure_threshold,
         circuit_reset_timeout_s=settings.circuit_reset_timeout_s,
         circuit_max_reset_timeout_s=settings.circuit_max_reset_timeout_s,
+        assumed_max_batch_size=settings.assumed_max_batch_size,
     )
     for i, url in enumerate(settings.replica_urls)
 ]

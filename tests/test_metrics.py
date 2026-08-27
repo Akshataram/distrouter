@@ -25,9 +25,10 @@ def test_record_request_counts_sla_violation_only_when_violated():
 
 
 def test_refresh_replica_gauges_reflects_current_state():
-    r = ReplicaState(replica_id=7, base_url="http://x", cache_ttl_s=600)
+    r = ReplicaState(replica_id=7, base_url="http://x", cache_ttl_s=600, assumed_max_batch_size=8)
     r.in_flight = 3
     metrics.refresh_replica_gauges([r])
+    assert metrics.REPLICA_BATCH_CAPACITY.labels(replica_id="7")._value.get() == 8
     assert metrics.REPLICA_IN_FLIGHT.labels(replica_id="7")._value.get() == 3
     assert metrics.REPLICA_CIRCUIT_STATE.labels(replica_id="7")._value.get() == 0  # closed
 
