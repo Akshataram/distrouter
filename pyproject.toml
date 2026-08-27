@@ -1,0 +1,9 @@
+[project]
+name = "swiftserve"
+version = "0.1.0"
+description = "Cache- and SLA-aware request routing for LLM replica clusters"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

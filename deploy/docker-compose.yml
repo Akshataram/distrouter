@@ -1,0 +1,90 @@
+# Real 3-replica Qwen deployment behind SwiftServe.
+#
+# Requires: Docker + NVIDIA Container Toolkit on a host with >=3 GPUs
+# (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+# This sandbox has neither GPUs nor Docker's GPU runtime -- run this on your
+# own GPU host or a cloud GPU VM.
+#
+# Usage:
+#   MODEL=Qwen/Qwen2.5-7B-Instruct docker compose -f deploy/docker-compose.yml up -d
+
+services:
+  qwen-replica-0:
+    image: vllm/vllm-openai:latest
+    command: ["--model", "${MODEL:-Qwen/Qwen2.5-7B-Instruct}", "--enable-prefix-caching", "--gpu-memory-utilization", "0.90"]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    ports: ["8001:8000"]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  qwen-replica-1:
+    image: vllm/vllm-openai:latest
+    command: ["--model", "${MODEL:-Qwen/Qwen2.5-7B-Instruct}", "--enable-prefix-caching", "--gpu-memory-utilization", "0.90"]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+    ports: ["8002:8000"]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  qwen-replica-2:
+    image: vllm/vllm-openai:latest
+    command: ["--model", "${MODEL:-Qwen/Qwen2.5-7B-Instruct}", "--enable-prefix-caching", "--gpu-memory-utilization", "0.90"]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=2
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["2"]
+              capabilities: [gpu]
+    ports: ["8003:8000"]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  swiftserve-router:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.router
+    environment:
+      - SWIFTSERVE_MODEL=${MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      - SWIFTSERVE_REPLICAS=http://qwen-replica-0:8000,http://qwen-replica-1:8000,http://qwen-replica-2:8000
+      - SWIFTSERVE_POLICY=${SWIFTSERVE_POLICY:-swiftserve}
+    ports: ["8000:8000"]
+    depends_on:
+      - qwen-replica-0
+      - qwen-replica-1
+      - qwen-replica-2
+
+volumes:
+  hf-cache:
