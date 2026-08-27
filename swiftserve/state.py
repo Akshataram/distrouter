@@ -21,6 +21,8 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 
+from swiftserve.resilience import CircuitBreaker
+
 _METRICS_FRESHNESS_S = 5.0
 _MAX_TRACKED_SESSIONS = 20_000
 
@@ -35,13 +37,27 @@ class ScrapedMetrics:
 
 
 class ReplicaState:
-    def __init__(self, replica_id: int, base_url: str, cache_ttl_s: float, seed_latency_ms: float = 800.0):
+    def __init__(
+        self,
+        replica_id: int,
+        base_url: str,
+        cache_ttl_s: float,
+        seed_latency_ms: float = 800.0,
+        circuit_failure_threshold: int = 5,
+        circuit_reset_timeout_s: float = 10.0,
+        circuit_max_reset_timeout_s: float = 120.0,
+    ):
         self.replica_id = replica_id
         self.base_url = base_url
         self.cache_ttl_s = cache_ttl_s
         self.in_flight = 0
         self.metrics = ScrapedMetrics()
         self.ewma_latency_ms = seed_latency_ms
+        self.circuit = CircuitBreaker(
+            failure_threshold=circuit_failure_threshold,
+            reset_timeout_s=circuit_reset_timeout_s,
+            max_reset_timeout_s=circuit_max_reset_timeout_s,
+        )
         self._session_last_used: "OrderedDict[str, float]" = OrderedDict()
 
     # -- load signals ---------------------------------------------------
@@ -89,4 +105,5 @@ class ReplicaState:
             "gpu_cache_usage_perc": round(self.metrics.gpu_cache_usage_perc, 3),
             "ewma_latency_ms": round(self.ewma_latency_ms, 1),
             "tracked_sessions": len(self._session_last_used),
+            "circuit": self.circuit.status(),
         }

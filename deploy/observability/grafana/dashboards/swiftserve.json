@@ -1,0 +1,131 @@
+{
+  "title": "SwiftServe",
+  "uid": "swiftserve-overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request rate by outcome",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(swiftserve_requests_total[1m]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Latency percentiles (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(swiftserve_request_latency_ms_bucket[1m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(swiftserve_request_latency_ms_bucket[1m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(swiftserve_request_latency_ms_bucket[1m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Cache hit rate",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(swiftserve_cache_hit_total{result=\"hit\"}[5m])) / sum(rate(swiftserve_cache_hit_total[5m]))",
+          "legendFormat": "cache hit rate"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "SLA violation rate",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "thresholds": { "steps": [
+        { "color": "green", "value": null },
+        { "color": "yellow", "value": 0.01 },
+        { "color": "red", "value": 0.05 }
+      ] } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(swiftserve_sla_violations_total[5m])) / sum(rate(swiftserve_requests_total[5m]))",
+          "legendFormat": "SLA violation rate"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Admission / circuit rejections",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "rate(swiftserve_admission_rejected_total[1m])",
+          "legendFormat": "admission rejected (server busy)"
+        },
+        {
+          "expr": "rate(swiftserve_all_circuits_open_total[1m])",
+          "legendFormat": "all circuits open"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Per-replica queue depth",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "swiftserve_replica_queue_depth",
+          "legendFormat": "replica {{replica_id}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Per-replica EWMA latency (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "swiftserve_replica_ewma_latency_ms",
+          "legendFormat": "replica {{replica_id}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Per-replica circuit state (0=closed, 1=half-open, 2=open)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 2 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "swiftserve_replica_circuit_state",
+          "legendFormat": "replica {{replica_id}}"
+        }
+      ]
+    }
+  ]
+}

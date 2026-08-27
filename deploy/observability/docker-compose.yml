@@ -1,0 +1,34 @@
+# Self-hosted observability stack: Prometheus scrapes the SwiftServe
+# router's /metrics; Grafana comes up pre-provisioned with that datasource
+# and the SwiftServe dashboard, no manual clicking required.
+#
+# Usage (run the SwiftServe router itself separately first, e.g.
+# `uvicorn swiftserve.app:app --port 8000` on the host):
+#   docker compose -f deploy/observability/docker-compose.yml up -d
+#   open http://localhost:3000   (Grafana, anonymous viewer access enabled)
+#   open http://localhost:9090   (Prometheus, for raw PromQL / target health)
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus

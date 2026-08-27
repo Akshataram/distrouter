@@ -37,5 +37,12 @@ class Settings:
     request_timeout_s: float = field(default_factory=lambda: float(os.environ.get("SWIFTSERVE_REQUEST_TIMEOUT_S", "120")))
     health_check_interval_s: float = field(default_factory=lambda: float(os.environ.get("SWIFTSERVE_HEALTH_INTERVAL_S", "5")))
 
+    circuit_failure_threshold: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_CIRCUIT_FAILURE_THRESHOLD", "5")))
+    circuit_reset_timeout_s: float = field(default_factory=lambda: float(os.environ.get("SWIFTSERVE_CIRCUIT_RESET_S", "10")))
+    circuit_max_reset_timeout_s: float = field(default_factory=lambda: float(os.environ.get("SWIFTSERVE_CIRCUIT_MAX_RESET_S", "120")))
+    admission_max_in_flight: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_MAX_IN_FLIGHT", "256")))
+    proxy_max_retries: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_PROXY_MAX_RETRIES", "2")))
+    proxy_retry_base_delay_s: float = field(default_factory=lambda: float(os.environ.get("SWIFTSERVE_PROXY_RETRY_BASE_DELAY_S", "0.1")))
+
 
 settings = Settings()

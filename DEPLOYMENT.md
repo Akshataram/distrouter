@@ -98,9 +98,7 @@ was warm on the chosen replica) for observability.
 
 ## 5. Benchmark: SwiftServe vs. round-robin vs. least-connections
 
-Run the same live workload against the router under each policy (restart
-the router with a different `SWIFTSERVE_POLICY` between runs, or run 3
-routers on 3 ports against the same replica pool):
+For a quick one-off number:
 
 ```bash
 python scripts/load_test.py --router-url http://localhost:8000 \
@@ -108,15 +106,102 @@ python scripts/load_test.py --router-url http://localhost:8000 \
 ```
 
 It reports real observed latency (mean/p50/p95/p99), cache-hit rate, SLA
-violation rate, and the request distribution across replicas -- compare
-these numbers across `SWIFTSERVE_POLICY=swiftserve` vs. `round_robin` vs.
-`least_connections` runs.
+violation rate, and the request distribution across replicas.
+
+**For anything you'd defend in front of a panel, use `scripts/benchmark.py`
+instead** -- one run of `load_test.py` can make round-robin look better or
+worse than SwiftServe purely from scheduling jitter. `benchmark.py` runs
+several independent trials (different seeds) per policy and reports a
+bootstrap confidence interval plus a permutation-test significance check
+between policies:
+
+```bash
+# once per policy, against a router already configured with that policy
+# (restart the router with a different SWIFTSERVE_POLICY between runs, or
+# run 3 routers on 3 ports against the same replica pool):
+python scripts/benchmark.py run --router-url http://localhost:8000 \
+  --policy-label swiftserve --num-sessions 30 --turns 4 --concurrency 6 \
+  --sla-ms 2000 --seeds 1,2,3,4,5 --output reports/swiftserve.json
+
+python scripts/benchmark.py run --router-url http://localhost:8001 \
+  --policy-label round_robin ... --output reports/round_robin.json
+python scripts/benchmark.py run --router-url http://localhost:8002 \
+  --policy-label least_connections ... --output reports/least_connections.json
+
+python scripts/benchmark.py compare reports/*.json
+```
+
+## 6. Real multi-node deployment (Colab / Kaggle, no local GPU needed)
+
+Everything above assumes GPUs you already control. If you don't have any,
+`notebooks/gpu_node.ipynb` turns a free Colab or Kaggle T4 session into one
+real replica node -- real vLLM, real Qwen weights, fronted by
+`swiftserve/replica_sidecar.py`, exposed over a public Cloudflare quick
+tunnel (no account needed). Run the same notebook in 2-3 separate free
+accounts (a second Colab account, a Kaggle account) to get a genuinely
+multi-node cluster -- separate physical GPUs, separate processes, real
+network latency between the router and each node, rather than 3 slices of
+one shared GPU.
+
+Each run of the notebook prints a public URL and an admin token. Point the
+router at the URLs (from wherever you're running it -- a laptop is fine,
+the router is CPU-only):
+
+```bash
+export SWIFTSERVE_REPLICAS=https://node-a.trycloudflare.com,https://node-b.trycloudflare.com
+uvicorn swiftserve.app:app --port 8000
+```
+
+## 7. Observability: Prometheus + Grafana
+
+```bash
+docker compose -f deploy/observability/docker-compose.yml up -d
+open http://localhost:3000   # Grafana, anonymous viewer access, dashboard pre-provisioned
+open http://localhost:9090   # Prometheus, for raw PromQL
+```
+
+Prometheus scrapes the router's own `/metrics` (request rate by outcome,
+latency percentiles, cache-hit/SLA-violation rate, admission rejections,
+per-replica queue depth/EWMA latency/circuit state) -- see
+`deploy/observability/prometheus.yml` if the router isn't reachable at
+`host.docker.internal:8000` (e.g. it's running on a separate machine).
+
+## 8. Chaos engineering: prove failover actually works
+
+With the router and each replica's sidecar reachable (single-box or
+multi-node), run a real fault-injection scenario:
+
+```bash
+python scripts/chaos_runner.py \
+  --router-url http://localhost:8000 \
+  --sidecar-urls http://localhost:9001,http://localhost:9002,http://localhost:9003 \
+  --target-replica 0 --scenario kill --admin-token "$SIDECAR_ADMIN_TOKEN" \
+  --fault-duration-s 15 --output chaos_report.json
+```
+
+`--scenario` is one of `partition`, `kill`, `latency`, `error-rate`. The
+runner drives real traffic through the router throughout, and reports
+whether the circuit breaker actually tripped, whether traffic actually
+rerouted to the surviving replicas, and how long recovery took (MTTR) once
+the fault cleared -- `tests/test_chaos_runner.py` runs the same scenarios
+end-to-end against real (if GPU-free) processes on every `pytest` run, so
+this is not new-to-you code the first time you run it live.
 
 ## Notes / production hardening
 
-- This is a routing prototype, not a hardened gateway: it has no auth,
-  rate limiting, or TLS termination. Put it behind a real ingress/load
-  balancer or add auth middleware before exposing it beyond a trusted network.
+- The router's `/v1/chat/completions` itself still has no auth or TLS
+  termination -- put it behind a real ingress/load balancer or add auth
+  middleware before exposing it beyond a trusted network. (The admission
+  controller is backpressure, not rate limiting or authorization: it
+  protects the cluster from being overwhelmed, it doesn't gate who's
+  allowed to send requests.) The replica sidecar's `/chaos/*` API is
+  bearer-token gated (`--admin-token` / `SIDECAR_ADMIN_TOKEN`) since it's
+  reachable at a public tunnel URL in the multi-node deployment -- always
+  set a real token for anything beyond a private demo.
+- `SWIFTSERVE_CIRCUIT_FAILURE_THRESHOLD` / `_CIRCUIT_RESET_S` /
+  `_CIRCUIT_MAX_RESET_S` tune the per-replica circuit breaker;
+  `SWIFTSERVE_MAX_IN_FLIGHT` tunes the global admission ceiling. See
+  `ARCHITECTURE.md` for what each actually does.
 - `SWIFTSERVE_CACHE_TTL_S` controls how long SwiftServe keeps believing a
   session's cache is warm on a replica after its last request; tune it
   against how long vLLM's own prefix cache actually stays resident under

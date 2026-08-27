@@ -1,0 +1,19 @@
+# Prometheus scrape config for the SwiftServe router's own /metrics
+# endpoint (swiftserve/metrics.py) -- not the individual vLLM replicas,
+# which the router already scrapes itself (see metrics_scraper.py) and
+# re-exposes as the swiftserve_replica_* gauges here.
+#
+# `host.docker.internal` works out of the box on Docker Desktop (Mac/
+# Windows); on Linux either add the extra_hosts mapping already present in
+# docker-compose.yml, or point this at the router's real reachable address
+# if it's running on a separate machine (e.g. one of the Colab/Kaggle
+# tunnel URLs is the *replica*, not the router -- the router itself is
+# meant to run somewhere you control, see DEPLOYMENT.md).
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: swiftserve-router
+    static_configs:
+      - targets: ["host.docker.internal:8000"]

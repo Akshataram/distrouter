@@ -18,12 +18,14 @@ import uuid
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
+from swiftserve import metrics
 from swiftserve.config import settings
 from swiftserve.metrics_scraper import scrape_loop
 from swiftserve.policy import POLICIES
+from swiftserve.resilience import AdmissionController, CircuitState
 from swiftserve.state import ReplicaState
 from swiftserve.proxy import forward_chat_completion
 
@@ -31,13 +33,21 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("swiftserve.app")
 
 replicas: list[ReplicaState] = [
-    ReplicaState(replica_id=i, base_url=url, cache_ttl_s=settings.cache_affinity_ttl_s)
+    ReplicaState(
+        replica_id=i,
+        base_url=url,
+        cache_ttl_s=settings.cache_affinity_ttl_s,
+        circuit_failure_threshold=settings.circuit_failure_threshold,
+        circuit_reset_timeout_s=settings.circuit_reset_timeout_s,
+        circuit_max_reset_timeout_s=settings.circuit_max_reset_timeout_s,
+    )
     for i, url in enumerate(settings.replica_urls)
 ]
 
 if settings.policy not in POLICIES:
     raise ValueError(f"Unknown SWIFTSERVE_POLICY={settings.policy!r}; choose from {list(POLICIES)}")
 policy = POLICIES[settings.policy]()
+admission = AdmissionController(max_in_flight=settings.admission_max_in_flight)
 
 _http_client: httpx.AsyncClient | None = None
 _scrape_stop_event = asyncio.Event()
@@ -68,11 +78,18 @@ async def healthz():
     return {"status": "ok", "policy": policy.name, "model": settings.model_name}
 
 
+@app.get("/metrics")
+async def router_metrics():
+    metrics.refresh_replica_gauges(replicas)
+    return Response(content=metrics.render_latest(), media_type=metrics.CONTENT_TYPE_LATEST)
+
+
 @app.get("/status")
 async def status():
     return {
         "model": settings.model_name,
         "policy": policy.name,
+        "admission": admission.status(),
         "replicas": [r.status() for r in replicas],
     }
 
@@ -85,17 +102,55 @@ async def chat_completions(request: Request):
     except json.JSONDecodeError:
         return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
 
+    if not admission.try_acquire():
+        metrics.record_admission_rejected()
+        return JSONResponse(
+            status_code=503,
+            content={"error": "server busy: at max in-flight capacity, retry shortly"},
+            headers={"Retry-After": "1"},
+        )
+
     session_id = request.headers.get("x-session-id") or payload.get("user") or str(uuid.uuid4())
     sla_ms = float(request.headers.get("x-sla-ms", settings.default_sla_ms))
     is_streaming = bool(payload.get("stream", False))
 
-    chosen = policy.select(session_id, sla_ms, replicas)
+    available = [r for r in replicas if not r.circuit.is_open() and r.circuit.has_probe_capacity()]
+    if not available:
+        admission.release()
+        metrics.record_all_circuits_open()
+        return JSONResponse(
+            status_code=503,
+            content={"error": "all replicas circuit-open: cluster is unhealthy"},
+            headers={"Retry-After": "2"},
+        )
+
+    # A half-open replica gets first claim on the next eligible request
+    # regardless of what the routing policy would otherwise pick: it needs
+    # real traffic to prove it has recovered, and a policy that keeps
+    # scoring the already-healthy replicas better (e.g. by latency
+    # estimate) would otherwise never route anything there again, leaving
+    # it half-open forever instead of closing or re-opening.
+    half_open_probes = [r for r in available if r.circuit.state is CircuitState.HALF_OPEN]
+    chosen = half_open_probes[0] if half_open_probes else policy.select(session_id, sla_ms, available)
     was_cache_hit = chosen.has_warm_cache(session_id)
     chosen.touch_session(session_id)
+    chosen.circuit.mark_dispatched()
     chosen.in_flight += 1
 
-    def release():
+    def release(latency_ms: float, success: bool):
+        # Single release point for this request's slots: forward_chat_completion
+        # guarantees this fires exactly once (success, HTTP error, or streaming
+        # failure alike), so nothing else in this handler should call it again.
         chosen.in_flight = max(0, chosen.in_flight - 1)
+        admission.release()
+        metrics.record_request(
+            replica_id=chosen.replica_id,
+            policy=policy.name,
+            outcome="success" if success else "error",
+            latency_ms=latency_ms,
+            was_cache_hit=was_cache_hit,
+            sla_violated=latency_ms > sla_ms,
+        )
 
     forward_headers = {
         k: v for k, v in request.headers.items()
@@ -111,9 +166,10 @@ async def chat_completions(request: Request):
             is_streaming=is_streaming,
             timeout_s=settings.request_timeout_s,
             on_complete=release,
+            max_retries=settings.proxy_max_retries,
+            retry_base_delay_s=settings.proxy_retry_base_delay_s,
         )
     except httpx.HTTPError as exc:
-        release()
         logger.error("upstream request to replica %s failed: %s", chosen.replica_id, exc)
         return JSONResponse(status_code=502, content={"error": f"upstream replica unreachable: {exc}"})
 

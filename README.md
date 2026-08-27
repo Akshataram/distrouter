@@ -1,7 +1,11 @@
 # SwiftServe
 
 Cache- and SLA-aware request routing for multi-turn LLM serving, deployed
-against a 3-replica Qwen cluster running vLLM.
+against a real multi-node Qwen/vLLM cluster -- with a resilience layer
+(circuit breaking, admission control), chaos engineering against real
+process kills and network partitions, Prometheus/Grafana observability,
+and a statistically rigorous benchmark harness. See `ARCHITECTURE.md` for
+the full system design and what's actually tested, and how.
 
 ## Abstract
 
@@ -68,38 +72,64 @@ inference computation is left untouched on the data plane.
 
 This is a real, runnable system, not a paper simulation:
 
-- `swiftserve/` -- the control plane itself (FastAPI). It proxies
-  OpenAI-compatible `/v1/chat/completions` calls to whichever real vLLM
-  replica it selects, tracks per-replica queue depth (both from its own
-  in-flight counter and by scraping each replica's vLLM `/metrics`
-  endpoint), and maintains the cache-affinity heatmap as soft state.
-- `deploy/` -- how to actually stand up 3 GPU replicas: a bare-metal launch
-  script and a Docker Compose file, both serving real Qwen weights via vLLM.
-- `scripts/load_test.py` -- a live load generator that drives real
-  multi-turn conversations through a running router and reports observed
-  latency, cache-hit rate, and per-replica load distribution.
-- `tests/` -- unit tests for the routing/state logic plus end-to-end smoke
-  tests that exercise the FastAPI app against a fake in-process backend (no
-  GPU needed to verify the wiring is correct).
+- `swiftserve/app.py`, `policy.py`, `state.py`, `config.py`,
+  `metrics_scraper.py` -- the control plane itself (FastAPI), unchanged in
+  spirit from the first version: it proxies OpenAI-compatible
+  `/v1/chat/completions` calls to whichever real vLLM replica it selects,
+  tracks per-replica queue depth, and maintains the cache-affinity heatmap
+  as soft state.
+- `swiftserve/resilience.py` -- per-replica circuit breaking and global
+  admission control, wired into the routing and proxy path.
+- `swiftserve/metrics.py` -- the router's own Prometheus instrumentation
+  (`/metrics`), separate from the per-replica vLLM metrics it scrapes.
+- `swiftserve/replica_sidecar.py` -- runs next to real vLLM on each GPU
+  node; proxies normal traffic through unchanged, and exposes an
+  authenticated `/chaos/*` API (partition / latency / error-rate / real
+  process kill+restart) for fault injection.
+- `scripts/chaos_runner.py` -- orchestrates a full fault-injection scenario
+  against a live deployment and reports whether it detected the fault,
+  rerouted, and recovered (with MTTR).
+- `scripts/benchmark.py` -- multi-seed statistical benchmark: bootstrap
+  confidence intervals and a permutation-test significance check between
+  policies, instead of one single-shot number.
+- `scripts/load_test.py` -- the original single-shot live load generator;
+  kept for a quick one-off check.
+- `scripts/fake_vllm_stub.py` -- an honestly-labeled, minimal HTTP
+  stand-in for vLLM, used only in this project's own GPU-free tests (see
+  `ARCHITECTURE.md`) -- never used for the project's actual benchmark
+  numbers, which come from real vLLM on real GPUs.
+- `notebooks/gpu_node.ipynb` -- turns a free Colab/Kaggle GPU session into
+  one real replica node (real vLLM + real Qwen, fronted by the chaos
+  sidecar, exposed via a public tunnel) -- run it in 2-3 separate free
+  accounts for a genuinely multi-node deployment.
+- `deploy/` -- bare-metal and Docker Compose launch scripts for a
+  single-box multi-GPU deployment, plus `deploy/observability/` (a
+  Prometheus + Grafana stack, pre-provisioned, scraping the router).
+- `tests/` -- unit tests for the routing/resilience/statistics logic, smoke
+  tests against a fake in-process backend, and a full end-to-end chaos test
+  that runs the router and sidecars as real separate OS processes over real
+  sockets (see `ARCHITECTURE.md`'s testing section for exactly what's real
+  vs. stood-in, and why).
 
-**SwiftServe needs no GPU to run** -- it's a thin CPU proxy. Actually serving
-Qwen requires real GPUs for the 3 vLLM replicas; see `DEPLOYMENT.md` for the
-full step-by-step guide (this includes a note that none of those GPU-side
-commands could be executed while building this repo, since the environment
-it was assembled in has no GPU -- verify them on your own hardware).
+**SwiftServe needs no GPU to run** -- it's a thin CPU proxy, and `pytest -q`
+(47 tests) needs no GPU either. Actually serving Qwen requires real GPUs;
+`DEPLOYMENT.md` covers both the original single-box path and the real
+multi-node path via `notebooks/gpu_node.ipynb`.
 
 ## Quickstart
 
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
-pytest -q                      # unit + smoke tests, no GPU required
+pytest -q                      # unit + smoke + end-to-end chaos tests, no GPU required
 
-# once you have 3 real vLLM/Qwen replicas up (see DEPLOYMENT.md):
+# once you have real vLLM/Qwen replicas up (single-box: see DEPLOYMENT.md
+# Option A/B/C; multi-node: notebooks/gpu_node.ipynb per node):
 export SWIFTSERVE_REPLICAS=http://localhost:8001,http://localhost:8002,http://localhost:8003
 uvicorn swiftserve.app:app --port 8000
 
 python scripts/load_test.py --router-url http://localhost:8000 --num-sessions 50 --turns 4
 ```
 
-See `DEPLOYMENT.md` for the full guide to launching real Qwen replicas and
-comparing SwiftServe against round-robin/least-connections baselines.
+See `DEPLOYMENT.md` for the full guide -- single-box and real multi-node
+deployment, the observability stack, and running a chaos scenario -- and
+`ARCHITECTURE.md` for the system design and known limitations.
