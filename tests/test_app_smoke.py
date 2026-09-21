@@ -234,3 +234,80 @@ async def test_request_id_echoed_back_and_forwarded_upstream_when_provided():
     assert resp.headers["x-request-id"] == "caller-supplied-id-123"
     assert captured.get("x-request-id") == "caller-supplied-id-123"
     await app_module._http_client.aclose()
+
+
+def make_fake_vllm_fast_500() -> FastAPI:
+    fake = FastAPI()
+
+    @fake.get("/health")
+    async def health():
+        return {"status": "ok"}
+
+    @fake.get("/metrics")
+    async def metrics():
+        return "vllm:num_requests_running 0\nvllm:num_requests_waiting 0\nvllm:gpu_cache_usage_perc 0.1\n"
+
+    @fake.post("/v1/chat/completions")
+    async def chat_completions():
+        return JSONResponse({"error": "upstream broke"}, status_code=500)
+
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_fast_failure_still_counts_as_sla_violated():
+    # A fast 500 must not look like a met SLA just because it beat the
+    # deadline -- meeting an SLA requires actually succeeding.
+    from swiftserve import metrics as metrics_module
+
+    fake_replica = make_fake_vllm_fast_500()
+    transport = httpx.ASGITransport(app=fake_replica)
+
+    app_module.replicas[:] = app_module.replicas[:1]
+    app_module._http_client = httpx.AsyncClient(transport=transport, base_url="http://fake")
+    app_module.replicas[0].base_url = "http://fake"
+
+    before = metrics_module.SLA_VIOLATIONS_TOTAL._value.get()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_module.app), base_url="http://router") as client:
+        resp = await client.post(
+            "/v1/chat/completions",
+            headers={"X-SLA-Ms": "100000"},  # generous SLA: latency alone would never violate it
+            content=json.dumps({"messages": [{"role": "user", "content": "hi"}]}),
+        )
+
+    assert resp.status_code == 500
+    assert metrics_module.SLA_VIOLATIONS_TOTAL._value.get() == before + 1
+    await app_module._http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_messages_reach_policy_and_populate_prefix_trie():
+    """Wiring check, not an algorithm check (that's tests/test_policy.py
+    and tests/test_prefix_trie.py in depth): confirms the parsed request
+    body's `messages` actually reach policy.select() and land in the
+    cross-session prefix trie, not just get parsed and dropped."""
+    fake_replica = make_fake_vllm("hello")
+    transport = httpx.ASGITransport(app=fake_replica)
+
+    app_module.replicas[:] = app_module.replicas[:1]
+    app_module._http_client = httpx.AsyncClient(transport=transport, base_url="http://fake")
+    app_module.replicas[0].base_url = "http://fake"
+
+    shared_messages = [
+        {"role": "system", "content": "wiring-test system prompt"},
+        {"role": "user", "content": "wiring-test first turn"},
+    ]
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_module.app), base_url="http://router") as client:
+        resp = await client.post(
+            "/v1/chat/completions",
+            headers={"X-Session-Id": "wiring-session"},
+            content=json.dumps({"messages": shared_messages}),
+        )
+
+    assert resp.status_code == 200
+    assert app_module.policy.name == "swiftserve"
+    replica_id, depth = app_module.policy._prefix_trie.longest_match(shared_messages)
+    assert replica_id == 0
+    assert depth == 2
+    await app_module._http_client.aclose()

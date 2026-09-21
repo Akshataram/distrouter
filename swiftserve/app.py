@@ -25,7 +25,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from swiftserve import metrics
 from swiftserve.config import settings
 from swiftserve.metrics_scraper import scrape_loop
-from swiftserve.policy import POLICIES
+from swiftserve.policy import POLICIES, Policy, SwiftServePolicy
+from swiftserve.prefix_trie import PrefixCacheTrie
 from swiftserve.proxy import forward_chat_completion
 from swiftserve.request_context import configure_logging, get_request_id, reset_request_id, set_request_id
 from swiftserve.resilience import AdmissionController, CircuitState
@@ -43,13 +44,22 @@ replicas: list[ReplicaState] = [
         circuit_reset_timeout_s=settings.circuit_reset_timeout_s,
         circuit_max_reset_timeout_s=settings.circuit_max_reset_timeout_s,
         assumed_max_batch_size=settings.assumed_max_batch_size,
+        cold_start_ms_per_token=settings.cold_start_ms_per_token,
     )
     for i, url in enumerate(settings.replica_urls)
 ]
 
 if settings.policy not in POLICIES:
     raise ValueError(f"Unknown SWIFTSERVE_POLICY={settings.policy!r}; choose from {list(POLICIES)}")
-policy = POLICIES[settings.policy]()
+policy: Policy
+if settings.policy == "swiftserve":
+    # Special-cased (rather than POLICIES[settings.policy]()) so the
+    # cross-session prefix trie picks up the same cache TTL and depth cap
+    # as the rest of the router's config, instead of SwiftServePolicy's
+    # zero-arg default.
+    policy = SwiftServePolicy(PrefixCacheTrie(ttl_s=settings.cache_affinity_ttl_s, max_depth=settings.prefix_trie_max_depth))
+else:
+    policy = POLICIES[settings.policy]()
 admission = AdmissionController(max_in_flight=settings.admission_max_in_flight)
 
 _http_client: httpx.AsyncClient | None = None
@@ -195,6 +205,7 @@ async def chat_completions(request: Request):
 
     session_id = request.headers.get("x-session-id") or payload.get("user") or str(uuid.uuid4())
     is_streaming = bool(payload.get("stream", False))
+    messages = payload.get("messages") or []
 
     available = [r for r in replicas if not r.circuit.is_open() and r.circuit.has_probe_capacity()]
     if not available:
@@ -213,7 +224,11 @@ async def chat_completions(request: Request):
     # estimate) would otherwise never route anything there again, leaving
     # it half-open forever instead of closing or re-opening.
     half_open_probes = [r for r in available if r.circuit.state is CircuitState.HALF_OPEN]
-    chosen = _pick_half_open_probe(half_open_probes) if half_open_probes else policy.select(session_id, sla_ms, available)
+    chosen = (
+        _pick_half_open_probe(half_open_probes)
+        if half_open_probes
+        else policy.select(session_id, sla_ms, available, messages)
+    )
     was_cache_hit = chosen.has_warm_cache(session_id)
     chosen.touch_session(session_id)
     chosen.circuit.mark_dispatched()
@@ -232,7 +247,10 @@ async def chat_completions(request: Request):
             outcome="success" if success else "error",
             latency_ms=latency_ms,
             was_cache_hit=was_cache_hit,
-            sla_violated=latency_ms > sla_ms,
+            # A fast failure (upstream 5xx, connect error) never "met SLA"
+            # just because it came back quickly -- meeting SLA requires
+            # actually succeeding, not merely responding fast.
+            sla_violated=(not success) or (latency_ms > sla_ms),
         )
 
     forward_headers = {

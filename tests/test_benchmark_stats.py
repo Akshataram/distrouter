@@ -8,9 +8,11 @@ import pytest
 
 from scripts.benchmark import (
     bootstrap_ci,
+    find_goodput,
     min_samples_for_percentile,
     percentile,
     permutation_test_diff_means,
+    sla_attainment,
     summarize_percentile,
     summarize_policy,
 )
@@ -116,3 +118,51 @@ def test_summarize_policy_reports_p50_p90_p95_p99_with_string_keys():
     # 20 total samples: enough for p50 (min 20) but not p90/p95/p99
     assert pcts["p50"]["reliable"] is True
     assert pcts["p99"]["reliable"] is False
+
+
+def test_sla_attainment_counts_only_successful_and_fast_requests():
+    results = [
+        {"status": 200, "latency_ms": 100.0},  # meets SLA
+        {"status": 200, "latency_ms": 5000.0},  # too slow
+        {"status": 503, "latency_ms": 5.0},  # fast but failed -- must not count
+        {"error": "connection refused"},  # dropped entirely -- must not count
+    ]
+    assert sla_attainment(results, sla_ms=1000.0) == 0.25  # 1 of 4 offered requests
+
+
+def test_sla_attainment_empty_results_is_zero():
+    assert sla_attainment([], sla_ms=1000.0) == 0.0
+
+
+def test_sla_attainment_all_pass():
+    results = [{"status": 200, "latency_ms": 10.0}, {"status": 200, "latency_ms": 20.0}]
+    assert sla_attainment(results, sla_ms=1000.0) == 1.0
+
+
+def test_find_goodput_picks_highest_passing_rps():
+    levels = [
+        {"target_rps": 5, "attainment": 0.99},
+        {"target_rps": 10, "attainment": 0.95},
+        {"target_rps": 20, "attainment": 0.80},  # fails the 90% target
+    ]
+    result = find_goodput(levels, sla_target=0.9)
+    assert result["goodput_rps"] == 10
+    assert result["sla_target"] == 0.9
+
+
+def test_find_goodput_none_when_lowest_level_already_fails():
+    levels = [{"target_rps": 5, "attainment": 0.5}, {"target_rps": 10, "attainment": 0.3}]
+    result = find_goodput(levels, sla_target=0.9)
+    assert result["goodput_rps"] is None
+
+
+def test_find_goodput_is_robust_to_non_monotonic_noise():
+    # A noisy dip at a low RPS shouldn't hide a legitimate higher level
+    # that happened to pass -- goodput is "max tested RPS that passed",
+    # not "the RPS just before the first failure".
+    levels = [
+        {"target_rps": 5, "attainment": 0.85},  # noisy dip, fails target
+        {"target_rps": 10, "attainment": 0.95},  # passes anyway
+    ]
+    result = find_goodput(levels, sla_target=0.9)
+    assert result["goodput_rps"] == 10

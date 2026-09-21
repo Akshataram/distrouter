@@ -100,7 +100,11 @@ async def run_session(
                     "replica": resp.headers.get("x-swiftserve-replica"),
                     "cache_hit": resp.headers.get("x-swiftserve-cache-hit"),
                     "sla_ms": sla_ms,
-                    "sla_violated": elapsed_ms > sla_ms,
+                    # A non-200 (e.g. a 503 admission rejection) is never a
+                    # met SLA just because it came back fast -- SLA
+                    # attainment means the request actually succeeded AND
+                    # was fast enough, not merely "some response arrived".
+                    "sla_violated": resp.status_code != 200 or elapsed_ms > sla_ms,
                 }
             )
             if resp.status_code == 200:

@@ -74,6 +74,7 @@ class ReplicaState:
         circuit_reset_timeout_s: float = 10.0,
         circuit_max_reset_timeout_s: float = 120.0,
         assumed_max_batch_size: int = 1,
+        cold_start_ms_per_token: float = 0.0,
     ):
         self.replica_id = replica_id
         self.base_url = base_url
@@ -82,6 +83,7 @@ class ReplicaState:
         self.metrics = ScrapedMetrics()
         self.ewma_latency_ms = seed_latency_ms
         self.max_batch_size = assumed_max_batch_size
+        self.cold_start_ms_per_token = cold_start_ms_per_token
         self._observed_max_concurrency = 0
         self._bucket_latency_ms = [seed_latency_ms] * _NUM_OCCUPANCY_BUCKETS
         self._bucket_observed = [False] * _NUM_OCCUPANCY_BUCKETS
@@ -107,6 +109,22 @@ class ReplicaState:
         shrinks once raised: real capacity doesn't go away because load
         happened to be low the last time we scraped."""
         return max(self.max_batch_size, self._observed_max_concurrency, 1)
+
+    def estimate_cold_start_penalty_ms(self, prefix_size_tokens: int) -> float:
+        """Extra expected latency from recomputing prefix_size_tokens of
+        prior conversation context on this replica, on top of
+        estimate_latency_ms()'s current-load estimate -- the MoonCake/
+        Preble observation that a cache miss isn't free, and its cost
+        scales with how much context must be recomputed. Modeled as a
+        flat per-token rate (cold_start_ms_per_token, default 0.0 = off)
+        rather than self-calibrated from observed data like
+        effective_batch_capacity: isolating "extra time from a cold
+        prefix" from "extra time from current load" isn't something
+        SwiftServe can cleanly observe per-request, so a fabricated
+        auto-learned curve here would be overclaiming, not a refinement.
+        A deployer who has actually measured their replicas' prefill
+        throughput can set SWIFTSERVE_COLD_START_MS_PER_TOKEN accordingly."""
+        return self.cold_start_ms_per_token * prefix_size_tokens
 
     def _occupancy_bucket(self, occupancy: int) -> int:
         """Which occupancy bucket a request landing at this concurrency

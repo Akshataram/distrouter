@@ -78,6 +78,11 @@ This is a real, runnable system, not a paper simulation:
   `/v1/chat/completions` calls to whichever real vLLM replica it selects,
   tracks per-replica queue depth, and maintains the cache-affinity heatmap
   as soft state.
+- `swiftserve/prefix_trie.py` -- a cross-session prefix tree (Preble-style
+  scheduling) that routes a *different* session sharing a common prompt
+  prefix to whichever replica already served it, not just a session's own
+  repeat turns; see `ARCHITECTURE.md` for how this and the DistServe/
+  MoonCake/llm-d ideas map onto what's actually implemented here.
 - `swiftserve/resilience.py` -- per-replica circuit breaking and global
   admission control, wired into the routing and proxy path.
 - `swiftserve/request_context.py` -- a `contextvars`-based request
@@ -94,7 +99,10 @@ This is a real, runnable system, not a paper simulation:
   rerouted, and recovered (with MTTR).
 - `scripts/benchmark.py` -- multi-seed statistical benchmark: bootstrap
   confidence intervals and a permutation-test significance check between
-  policies, instead of one single-shot number.
+  policies, instead of one single-shot number. Also implements Goodput@N
+  (DistServe's metric): `goodput`/`goodput-compare` sweep open-loop
+  offered load to find the max RPS a policy sustains at a target SLA-
+  attainment rate.
 - `scripts/load_test.py` -- the original single-shot live load generator;
   kept for a quick one-off check.
 - `scripts/fake_vllm_stub.py` -- an honestly-labeled, minimal HTTP
@@ -115,7 +123,7 @@ This is a real, runnable system, not a paper simulation:
   vs. stood-in, and why).
 
 **SwiftServe needs no GPU to run** -- it's a thin CPU proxy, and `pytest -q`
-(79 tests) needs no GPU either. `ruff check .` and `mypy swiftserve` are
+(109 tests) needs no GPU either. `ruff check .` and `mypy swiftserve` are
 clean, and `.github/workflows/ci.yml` runs all three on every push/PR
 across Python 3.10-3.12. Actually serving Qwen requires real GPUs;
 `DEPLOYMENT.md` covers both the original single-box path and the real

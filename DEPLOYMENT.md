@@ -142,6 +142,33 @@ python scripts/benchmark.py run --router-url http://localhost:8002 \
 python scripts/benchmark.py compare reports/*.json
 ```
 
+**For "how much load can this actually take" (DistServe's Goodput
+metric), use `scripts/benchmark.py goodput`** instead of either of the
+above -- `run`/`compare` measure latency at a load level you pick
+(`--concurrency`); `goodput` sweeps *offered* load itself (an open-loop
+Poisson arrival process, independent of how fast the system responds) to
+find the highest request rate sustaining a target SLA-attainment
+percentage:
+
+```bash
+python scripts/benchmark.py goodput --router-url http://localhost:8000 \
+  --policy-label swiftserve --rps-levels 5,10,15,20,25,30 \
+  --duration-s 20 --turns 4 --sla-ms 2000 --sla-target 0.9 \
+  --output reports/goodput_swiftserve.json
+
+python scripts/benchmark.py goodput --router-url http://localhost:8001 \
+  --policy-label round_robin --rps-levels 5,10,15,20,25,30 \
+  --duration-s 20 --turns 4 --sla-ms 2000 --sla-target 0.9 \
+  --output reports/goodput_round_robin.json
+
+python scripts/benchmark.py goodput-compare reports/goodput_*.json
+```
+
+The report prints a per-RPS-level table (offered/completed requests, SLA
+attainment, mean/p95 latency) and the resulting Goodput@90 -- the highest
+*tested* RPS that actually cleared the target, never an interpolated
+guess, and honestly `None` if no tested level cleared it.
+
 ## 6. Real multi-node deployment (Colab / Kaggle, no local GPU needed)
 
 Everything above assumes GPUs you already control. If you don't have any,
@@ -225,6 +252,16 @@ this is not new-to-you code the first time you run it live.
 - `SWIFTSERVE_CACHE_TTL_S` controls how long SwiftServe keeps believing a
   session's cache is warm on a replica after its last request; tune it
   against how long vLLM's own prefix cache actually stays resident under
-  your memory pressure and traffic mix.
+  your memory pressure and traffic mix. The cross-session prefix trie
+  (`ARCHITECTURE.md` section 8) uses the same TTL.
+- `SWIFTSERVE_PREFIX_TRIE_MAX_DEPTH` (default 6) caps how many messages
+  the cross-session prefix trie compares -- only early turns (system
+  prompts, few-shot examples) are realistically shared verbatim across
+  independent conversations.
+- `SWIFTSERVE_COLD_START_MS_PER_TOKEN` (default `0.0`, off) prices the
+  routing fallback's estimate of recomputing a cold prefix on a per-token
+  basis; leave it at 0 unless you've actually measured your replicas'
+  prefill throughput (see `ARCHITECTURE.md` section 9 for why this isn't
+  self-calibrated the way batch capacity is).
 - Scaling past 3 replicas only requires adding more URLs to
   `SWIFTSERVE_REPLICAS`; nothing else in the routing logic is hardcoded to 3.

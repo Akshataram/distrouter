@@ -109,3 +109,14 @@ def test_queueing_formula_uses_busiest_bucket_service_time():
     r.record_completion_latency(200.0, occupancy_at_dispatch=3)  # busiest bucket calibrated to 200ms
     r.in_flight = 4  # depth == capacity: queueing branch
     assert r.estimate_latency_ms() == 200.0 * 5 / 4
+
+
+def test_cold_start_penalty_is_zero_by_default():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600)
+    assert r.estimate_cold_start_penalty_ms(prefix_size_tokens=10_000) == 0.0
+
+
+def test_cold_start_penalty_scales_with_prefix_size_when_configured():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, cold_start_ms_per_token=2.0)
+    assert r.estimate_cold_start_penalty_ms(prefix_size_tokens=100) == 200.0
+    assert r.estimate_cold_start_penalty_ms(prefix_size_tokens=0) == 0.0
