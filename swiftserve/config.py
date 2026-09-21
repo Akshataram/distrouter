@@ -44,6 +44,10 @@ class Settings:
     proxy_max_retries: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_PROXY_MAX_RETRIES", "2")))
     proxy_retry_base_delay_s: float = field(default_factory=lambda: float(os.environ.get("SWIFTSERVE_PROXY_RETRY_BASE_DELAY_S", "0.1")))
     assumed_max_batch_size: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_ASSUMED_MAX_BATCH_SIZE", "1")))
+    # Unset (default) means the router's own API is unauthenticated -- fine
+    # for a private demo, not for anything exposed beyond a trusted network.
+    # Mirrors replica_sidecar.py's SIDECAR_ADMIN_TOKEN / X-Chaos-Token pattern.
+    api_token: str | None = field(default_factory=lambda: os.environ.get("SWIFTSERVE_API_TOKEN") or None)
 
 
 settings = Settings()

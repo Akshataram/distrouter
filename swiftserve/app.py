@@ -18,18 +18,20 @@ import uuid
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from swiftserve import metrics
 from swiftserve.config import settings
 from swiftserve.metrics_scraper import scrape_loop
 from swiftserve.policy import POLICIES
+from swiftserve.proxy import forward_chat_completion
+from swiftserve.request_context import configure_logging, get_request_id, reset_request_id, set_request_id
 from swiftserve.resilience import AdmissionController, CircuitState
 from swiftserve.state import ReplicaState
-from swiftserve.proxy import forward_chat_completion
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger("swiftserve.app")
 
 replicas: list[ReplicaState] = [
@@ -64,6 +66,11 @@ async def lifespan(app: FastAPI):
         "SwiftServe up | model=%s | policy=%s | replicas=%s",
         settings.model_name, policy.name, [r.base_url for r in replicas],
     )
+    if not settings.api_token:
+        logger.warning(
+            "SWIFTSERVE_API_TOKEN not set: /v1/chat/completions, /status, and /metrics are "
+            "unauthenticated. Fine for a private demo, not for anything exposed beyond a trusted network."
+        )
     yield
     _scrape_stop_event.set()
     if _scrape_task:
@@ -74,18 +81,75 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="SwiftServe", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def _request_id_middleware(request: Request, call_next):
+    """Accept an inbound X-Request-Id (e.g. from a caller correlating its
+    own logs, or a replica echoing back a router-issued ID on an unrelated
+    request) or mint a new one, make it available to every log line in this
+    request's call chain via the request_context contextvar, and echo it
+    back so the caller can correlate this response with router/proxy logs."""
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    token = set_request_id(request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        reset_request_id(token)
+    response.headers["X-Request-Id"] = request_id
+    return response
+
+
+async def _require_api_token(authorization: str | None = Header(default=None)) -> None:
+    """No-op when SWIFTSERVE_API_TOKEN is unset, preserving today's
+    unauthenticated behavior by default. When set, requires an exact
+    ``Authorization: Bearer <token>`` match -- same bearer-token shape as
+    replica_sidecar.py's X-Chaos-Token admin API, applied here to the
+    endpoints that either spend real inference capacity
+    (/v1/chat/completions) or leak operational detail (/status, /metrics)."""
+    if not settings.api_token:
+        return
+    if authorization != f"Bearer {settings.api_token}":
+        raise HTTPException(status_code=401, detail="missing or invalid Authorization bearer token")
+
+
+def _pick_half_open_probe(candidates: list[ReplicaState]) -> ReplicaState:
+    """Which currently-half-open replica gets this request's probe slot.
+
+    Picking whichever replica happens to sort first (e.g. always the
+    lowest replica_id) would let it monopolize every probe request until
+    its own half_open_max_probes is exhausted before any other
+    simultaneously-recovering replica gets a single probe. Preferring the
+    replica with the fewest probes already outstanding spreads probe
+    traffic evenly across all of them instead, so several replicas
+    recovering from a correlated failure all get a chance to prove
+    themselves at roughly the same rate."""
+    return min(candidates, key=lambda r: (r.circuit.half_open_in_flight, r.replica_id))
+
+
+class ChatCompletionRequest(BaseModel):
+    """Shape validation only, never reserialized: the original raw bytes
+    (not this model) are what get forwarded upstream, so an extra field
+    vLLM accepts but this model doesn't know about is never dropped."""
+
+    model_config = ConfigDict(extra="allow")
+
+    messages: list[dict] | None = None
+    stream: bool = False
+    user: str | None = None
+
+
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok", "policy": policy.name, "model": settings.model_name}
 
 
-@app.get("/metrics")
+@app.get("/metrics", dependencies=[Depends(_require_api_token)])
 async def router_metrics():
     metrics.refresh_replica_gauges(replicas)
     return Response(content=metrics.render_latest(), media_type=metrics.CONTENT_TYPE_LATEST)
 
 
-@app.get("/status")
+@app.get("/status", dependencies=[Depends(_require_api_token)])
 async def status():
     return {
         "model": settings.model_name,
@@ -95,13 +159,31 @@ async def status():
     }
 
 
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=[Depends(_require_api_token)])
 async def chat_completions(request: Request):
+    assert _http_client is not None  # set by lifespan(), which runs before any request is served
     raw_body = await request.body()
     try:
         payload = json.loads(raw_body)
     except json.JSONDecodeError:
         return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+
+    if not isinstance(payload, dict):
+        return JSONResponse(status_code=400, content={"error": "request body must be a JSON object"})
+
+    try:
+        ChatCompletionRequest.model_validate(payload)
+    except ValidationError as exc:
+        return JSONResponse(status_code=400, content={"error": f"invalid request body: {exc.errors()[0]['msg']}"})
+
+    sla_header = request.headers.get("x-sla-ms")
+    if sla_header is None:
+        sla_ms = settings.default_sla_ms
+    else:
+        try:
+            sla_ms = float(sla_header)
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "X-SLA-Ms header must be a number"})
 
     if not admission.try_acquire():
         metrics.record_admission_rejected()
@@ -112,7 +194,6 @@ async def chat_completions(request: Request):
         )
 
     session_id = request.headers.get("x-session-id") or payload.get("user") or str(uuid.uuid4())
-    sla_ms = float(request.headers.get("x-sla-ms", settings.default_sla_ms))
     is_streaming = bool(payload.get("stream", False))
 
     available = [r for r in replicas if not r.circuit.is_open() and r.circuit.has_probe_capacity()]
@@ -132,10 +213,11 @@ async def chat_completions(request: Request):
     # estimate) would otherwise never route anything there again, leaving
     # it half-open forever instead of closing or re-opening.
     half_open_probes = [r for r in available if r.circuit.state is CircuitState.HALF_OPEN]
-    chosen = half_open_probes[0] if half_open_probes else policy.select(session_id, sla_ms, available)
+    chosen = _pick_half_open_probe(half_open_probes) if half_open_probes else policy.select(session_id, sla_ms, available)
     was_cache_hit = chosen.has_warm_cache(session_id)
     chosen.touch_session(session_id)
     chosen.circuit.mark_dispatched()
+    occupancy_at_dispatch = chosen.queue_depth()
     chosen.in_flight += 1
 
     def release(latency_ms: float, success: bool):
@@ -157,6 +239,10 @@ async def chat_completions(request: Request):
         k: v for k, v in request.headers.items()
         if k.lower() not in {"host", "content-length"}
     }
+    # Always present, even if the caller didn't send one: the middleware
+    # already generated an ID for this request, and the replica/sidecar
+    # should log against the same one rather than minting its own.
+    forward_headers["X-Request-Id"] = get_request_id()
     try:
         response = await forward_chat_completion(
             client=_http_client,
@@ -169,6 +255,7 @@ async def chat_completions(request: Request):
             on_complete=release,
             max_retries=settings.proxy_max_retries,
             retry_base_delay_s=settings.proxy_retry_base_delay_s,
+            occupancy_at_dispatch=occupancy_at_dispatch,
         )
     except httpx.HTTPError as exc:
         logger.error("upstream request to replica %s failed: %s", chosen.replica_id, exc)

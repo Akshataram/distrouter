@@ -15,12 +15,50 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import random
 import statistics
 import time
 import uuid
 
 import httpx
+
+# A percentile estimate is only as good as how many samples actually land
+# in its tail: p99 asks "what's typical of the worst 1%", which is
+# unanswerable from a few dozen requests -- you'd just be reading off the
+# single largest observation and calling it a percentile. Requiring at
+# least ~10 samples past the tail (min 20 overall) is a standard rule of
+# thumb for a percentile to reflect real distribution shape rather than
+# noise from the top 1-2 points.
+_MIN_TAIL_SAMPLES = 10
+
+
+def percentile(sorted_values: list[float], p: float) -> float:
+    """Linear-interpolation percentile (numpy's default 'linear' method),
+    0 <= p <= 100, over an already-sorted list."""
+    if not sorted_values:
+        raise ValueError("percentile of empty data")
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    rank = (p / 100) * (len(sorted_values) - 1)
+    lo = int(rank)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (rank - lo)
+
+
+def min_samples_for_percentile(p: float) -> int:
+    tail_fraction = (100 - p) / 100
+    return max(20, math.ceil(_MIN_TAIL_SAMPLES / tail_fraction))
+
+
+def format_percentile(sorted_values: list[float], p: float) -> str:
+    value = percentile(sorted_values, p)
+    min_n = min_samples_for_percentile(p)
+    n = len(sorted_values)
+    if n < min_n:
+        return f"{value:.1f}ms (unreliable: n={n}, want >={min_n})"
+    return f"{value:.1f}ms"
+
 
 PROMPTS = [
     "Summarize the plot of a story about a lighthouse keeper.",
@@ -77,12 +115,11 @@ async def main_async(args):
     semaphore = asyncio.Semaphore(args.concurrency)
 
     async def bounded_session(session_id: str):
-        async with semaphore:
-            async with httpx.AsyncClient() as client:
-                await run_session(
-                    client, args.router_url, args.model, session_id,
-                    args.turns, args.sla_ms, args.max_tokens, results,
-                )
+        async with semaphore, httpx.AsyncClient() as client:
+            await run_session(
+                client, args.router_url, args.model, session_id,
+                args.turns, args.sla_ms, args.max_tokens, results,
+            )
 
     session_ids = [f"loadtest-{uuid.uuid4().hex[:8]}" for _ in range(args.num_sessions)]
     start = time.monotonic()
@@ -102,12 +139,19 @@ async def main_async(args):
     for r in ok:
         replica_counts[r["replica"]] = replica_counts.get(r["replica"], 0) + 1
 
-    quantiles = statistics.quantiles(latencies, n=100, method="inclusive")
     print(f"Requests: {len(ok)} ok, {len(errors)} errored | wall clock: {wall_s:.1f}s")
     print(f"Cache-hit rate (of requests that report it): {len(cache_hits)}/{len(ok)} = {len(cache_hits) / len(ok):.1%}")
     print(f"SLA violation rate: {len(sla_violations)}/{len(ok)} = {len(sla_violations) / len(ok):.1%}")
-    print(f"Latency ms: mean={statistics.fmean(latencies):.1f} p50={quantiles[49]:.1f} p95={quantiles[94]:.1f} p99={quantiles[98]:.1f}")
+    print(
+        f"Latency: mean={statistics.fmean(latencies):.1f}ms "
+        f"p50={format_percentile(latencies, 50)} p90={format_percentile(latencies, 90)} "
+        f"p95={format_percentile(latencies, 95)} p99={format_percentile(latencies, 99)}"
+    )
     print(f"Requests per replica: {replica_counts}")
+    print(
+        "(this is scripts/load_test.py -- a single-shot number that scheduling jitter can swing; "
+        "for anything you'd defend, use scripts/benchmark.py's multi-seed bootstrap CIs instead)"
+    )
 
 
 def main():

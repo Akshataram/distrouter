@@ -32,13 +32,44 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import random
 import statistics
 import time
 import uuid
-from typing import Callable
+from collections.abc import Callable
 
 import httpx
+
+# A percentile estimate is only as good as how many samples actually land
+# in its tail: p99 asks "what's typical of the worst 1%", which is
+# unanswerable from a few dozen requests -- you'd just be reading off the
+# single largest observation and calling it a percentile. Requiring at
+# least ~10 samples past the tail (min 20 overall) is a standard rule of
+# thumb for a percentile to reflect real distribution shape rather than
+# noise from the top 1-2 points. Deliberately duplicated from
+# scripts/load_test.py (not imported) for the same standalone-script reason
+# as PROMPTS below.
+_MIN_TAIL_SAMPLES = 10
+
+
+def percentile(sorted_values: list[float], p: float) -> float:
+    """Linear-interpolation percentile (numpy's default 'linear' method),
+    0 <= p <= 100, over an already-sorted list."""
+    if not sorted_values:
+        raise ValueError("percentile of empty data")
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    rank = (p / 100) * (len(sorted_values) - 1)
+    lo = int(rank)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (rank - lo)
+
+
+def min_samples_for_percentile(p: float) -> int:
+    tail_fraction = (100 - p) / 100
+    return max(20, math.ceil(_MIN_TAIL_SAMPLES / tail_fraction))
+
 
 # Deliberately duplicated from scripts/load_test.py (not imported) so this
 # stays a self-contained script runnable directly (`python
@@ -151,9 +182,8 @@ async def run_one_trial(
     semaphore = asyncio.Semaphore(concurrency)
 
     async def bounded_session(session_id: str):
-        async with semaphore:
-            async with httpx.AsyncClient() as client:
-                await run_session(client, router_url, model, session_id, turns, sla_ms, max_tokens, results)
+        async with semaphore, httpx.AsyncClient() as client:
+            await run_session(client, router_url, model, session_id, turns, sla_ms, max_tokens, results)
 
     session_ids = [f"bench-{seed}-{uuid.uuid4().hex[:8]}" for _ in range(num_sessions)]
     await asyncio.gather(*(bounded_session(sid) for sid in session_ids))
@@ -191,6 +221,27 @@ async def run_policy_trials(
     return trials
 
 
+def summarize_percentile(all_latencies: list[float], p: float) -> dict:
+    """Point estimate plus a bootstrap 95% CI, computed over the pooled
+    per-request latencies (not per-trial means -- "p95 latency" is a
+    statement about individual requests). ``reliable`` is False when there
+    simply aren't enough samples in this percentile's tail for the number
+    to mean anything yet -- callers should show that, not hide it behind a
+    falsely-precise decimal."""
+    min_n = min_samples_for_percentile(p)
+    if len(all_latencies) < 2:
+        return {"point": None, "ci95_low": None, "ci95_high": None, "n": len(all_latencies), "min_recommended_n": min_n, "reliable": False}
+    point, lo, hi = bootstrap_ci(all_latencies, stat_fn=lambda xs: percentile(sorted(xs), p))
+    return {
+        "point": point,
+        "ci95_low": lo,
+        "ci95_high": hi,
+        "n": len(all_latencies),
+        "min_recommended_n": min_n,
+        "reliable": len(all_latencies) >= min_n,
+    }
+
+
 def summarize_policy(policy_label: str, trials: list[dict]) -> dict:
     all_latencies = [latency for t in trials for latency in t["latencies"]]
     per_trial_means = [statistics.fmean(t["latencies"]) for t in trials if t["latencies"]]
@@ -203,7 +254,6 @@ def summarize_policy(policy_label: str, trials: list[dict]) -> dict:
     mean_point, mean_lo, mean_hi = ci_or_nan(per_trial_means)
     cache_point, cache_lo, cache_hi = ci_or_nan(cache_hit_rates)
     sla_point, sla_lo, sla_hi = ci_or_nan(sla_violation_rates)
-    quantiles = statistics.quantiles(all_latencies, n=100, method="inclusive") if len(all_latencies) >= 2 else None
 
     return {
         "policy": policy_label,
@@ -211,9 +261,11 @@ def summarize_policy(policy_label: str, trials: list[dict]) -> dict:
         "total_requests": sum(t["ok"] for t in trials),
         "total_errors": sum(t["errors"] for t in trials),
         "mean_latency_ms": {"point": mean_point, "ci95_low": mean_lo, "ci95_high": mean_hi},
-        "p50_latency_ms": quantiles[49] if quantiles else None,
-        "p95_latency_ms": quantiles[94] if quantiles else None,
-        "p99_latency_ms": quantiles[98] if quantiles else None,
+        # String keys, not int: this dict round-trips through JSON (saved by
+        # `run`, reloaded by `compare`), and json.dump silently stringifies
+        # int dict keys on the way out -- using strings from the start keeps
+        # a freshly-computed report and one reloaded from disk identical.
+        "latency_percentiles_ms": {f"p{p}": summarize_percentile(all_latencies, p) for p in (50, 90, 95, 99)},
         "cache_hit_rate": {"point": cache_point, "ci95_low": cache_lo, "ci95_high": cache_hi},
         "sla_violation_rate": {"point": sla_point, "ci95_low": sla_lo, "ci95_high": sla_hi},
         "per_trial_means_ms": per_trial_means,
@@ -221,18 +273,35 @@ def summarize_policy(policy_label: str, trials: list[dict]) -> dict:
     }
 
 
+def _fmt_percentile_cell(pct: dict) -> str:
+    if pct["point"] is None:
+        return "n/a"
+    flag = "" if pct["reliable"] else "*"
+    return f"{pct['point']:.0f}{flag}"
+
+
 def print_comparison_table(reports: list[dict]) -> None:
     print(
         f"{'policy':<18}{'n':>6}{'mean_ms':>10}{'95% CI (ms)':>20}"
-        f"{'p50':>8}{'p95':>8}{'p99':>8}{'cache_hit':>11}{'sla_viol':>10}"
+        f"{'p50':>7}{'p90':>7}{'p95':>7}{'p99':>7}{'cache_hit':>11}{'sla_viol':>10}"
     )
+    any_unreliable = False
     for r in reports:
         ci = r["mean_latency_ms"]
         ci_str = f"[{ci['ci95_low']:.0f}, {ci['ci95_high']:.0f}]"
+        pcts = r["latency_percentiles_ms"]
+        any_unreliable = any_unreliable or any(not pcts[k]["reliable"] for k in ("p50", "p90", "p95", "p99"))
         print(
             f"{r['policy']:<18}{r['total_requests']:>6}{ci['point']:>10.1f}{ci_str:>20}"
-            f"{r['p50_latency_ms']:>8.1f}{r['p95_latency_ms']:>8.1f}{r['p99_latency_ms']:>8.1f}"
+            f"{_fmt_percentile_cell(pcts['p50']):>7}{_fmt_percentile_cell(pcts['p90']):>7}"
+            f"{_fmt_percentile_cell(pcts['p95']):>7}{_fmt_percentile_cell(pcts['p99']):>7}"
             f"{r['cache_hit_rate']['point']:>10.1%}{r['sla_violation_rate']['point']:>10.1%}"
+        )
+    if any_unreliable:
+        print(
+            "* = fewer samples than recommended for a reliable estimate at that percentile "
+            "(see the report JSON's latency_percentiles_ms.<p>.n vs .min_recommended_n -- "
+            "run more trials/sessions, or trust the mean's 95% CI instead)"
         )
 
     print("\nPairwise significance (permutation test on per-trial mean latency, two-sided, alpha=0.05):")

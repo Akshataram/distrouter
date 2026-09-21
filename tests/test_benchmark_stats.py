@@ -4,7 +4,16 @@ operate only on plain lists of numbers."""
 
 import statistics
 
-from scripts.benchmark import bootstrap_ci, permutation_test_diff_means
+import pytest
+
+from scripts.benchmark import (
+    bootstrap_ci,
+    min_samples_for_percentile,
+    percentile,
+    permutation_test_diff_means,
+    summarize_percentile,
+    summarize_policy,
+)
 
 
 def test_bootstrap_ci_on_constant_values_has_zero_width():
@@ -52,3 +61,58 @@ def test_permutation_test_clearly_separated_distributions_is_significant():
 def test_permutation_test_too_few_samples_returns_nan_p_value():
     diff, p_value = permutation_test_diff_means([1.0], [2.0, 3.0])
     assert p_value != p_value  # NaN != NaN
+
+
+def test_percentile_matches_known_linear_interpolation_values():
+    data = sorted(float(i) for i in range(1, 101))  # 1..100
+    assert percentile(data, 50) == 50.5
+    assert percentile(data, 90) == pytest.approx(90.1)
+    assert percentile(data, 95) == pytest.approx(95.05)
+    assert percentile(data, 99) == pytest.approx(99.01)
+
+
+def test_percentile_of_single_value_is_that_value():
+    assert percentile([42.0], 99) == 42.0
+
+
+def test_min_samples_for_percentile_increases_toward_the_tail():
+    p50 = min_samples_for_percentile(50)
+    p90 = min_samples_for_percentile(90)
+    p95 = min_samples_for_percentile(95)
+    p99 = min_samples_for_percentile(99)
+    assert p50 < p90 < p95 < p99
+    assert p99 == 1000  # 10 tail samples / 1% tail fraction
+
+
+def test_summarize_percentile_flags_small_samples_as_unreliable():
+    small = [100.0, 105.0, 98.0, 110.0, 95.0]  # 5 samples, nowhere near p99's 1000
+    result = summarize_percentile(small, 99)
+    assert result["reliable"] is False
+    assert result["n"] == 5
+    assert result["point"] is not None  # still computed, just flagged
+
+
+def test_summarize_percentile_reliable_once_enough_samples():
+    large = [100.0 + (i % 7) for i in range(25)]  # 25 >= min_samples_for_percentile(50)=20
+    result = summarize_percentile(large, 50)
+    assert result["reliable"] is True
+    assert result["ci95_low"] <= result["point"] <= result["ci95_high"]
+
+
+def test_summarize_percentile_empty_data_has_no_point_estimate():
+    result = summarize_percentile([], 50)
+    assert result["point"] is None
+    assert result["reliable"] is False
+
+
+def test_summarize_policy_reports_p50_p90_p95_p99_with_string_keys():
+    trials = [
+        {"seed": 1, "ok": 10, "errors": 0, "latencies": [float(i) for i in range(1, 11)], "cache_hit_rate": 0.5, "sla_violation_rate": 0.1},
+        {"seed": 2, "ok": 10, "errors": 0, "latencies": [float(i) for i in range(11, 21)], "cache_hit_rate": 0.6, "sla_violation_rate": 0.0},
+    ]
+    report = summarize_policy("swiftserve", trials)
+    pcts = report["latency_percentiles_ms"]
+    assert set(pcts.keys()) == {"p50", "p90", "p95", "p99"}
+    # 20 total samples: enough for p50 (min 20) but not p90/p95/p99
+    assert pcts["p50"]["reliable"] is True
+    assert pcts["p99"]["reliable"] is False

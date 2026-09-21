@@ -80,6 +80,9 @@ This is a real, runnable system, not a paper simulation:
   as soft state.
 - `swiftserve/resilience.py` -- per-replica circuit breaking and global
   admission control, wired into the routing and proxy path.
+- `swiftserve/request_context.py` -- a `contextvars`-based request
+  correlation ID (`X-Request-Id`), propagated through the router's and
+  sidecar's logs without threading it through every function signature.
 - `swiftserve/metrics.py` -- the router's own Prometheus instrumentation
   (`/metrics`), separate from the per-replica vLLM metrics it scrapes.
 - `swiftserve/replica_sidecar.py` -- runs next to real vLLM on each GPU
@@ -112,7 +115,9 @@ This is a real, runnable system, not a paper simulation:
   vs. stood-in, and why).
 
 **SwiftServe needs no GPU to run** -- it's a thin CPU proxy, and `pytest -q`
-(47 tests) needs no GPU either. Actually serving Qwen requires real GPUs;
+(79 tests) needs no GPU either. `ruff check .` and `mypy swiftserve` are
+clean, and `.github/workflows/ci.yml` runs all three on every push/PR
+across Python 3.10-3.12. Actually serving Qwen requires real GPUs;
 `DEPLOYMENT.md` covers both the original single-box path and the real
 multi-node path via `notebooks/gpu_node.ipynb`.
 
@@ -121,6 +126,8 @@ multi-node path via `notebooks/gpu_node.ipynb`.
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
 pytest -q                      # unit + smoke + end-to-end chaos tests, no GPU required
+ruff check .                   # lint
+mypy swiftserve                # type-check
 
 # once you have real vLLM/Qwen replicas up (single-box: see DEPLOYMENT.md
 # Option A/B/C; multi-node: notebooks/gpu_node.ipynb per node):
