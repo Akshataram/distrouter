@@ -30,6 +30,7 @@ import random
 import shlex
 import signal
 import subprocess
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -37,6 +38,9 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from swiftserve.request_context import configure_logging, reset_request_id, set_request_id
+
+configure_logging()
 logger = logging.getLogger("swiftserve.replica_sidecar")
 
 _HOP_BY_HOP_HEADERS = {
@@ -78,6 +82,7 @@ class ProcessSupervisor:
     def start(self) -> None:
         if not self.supervised:
             return
+        assert self.launch_cmd is not None  # guaranteed by `supervised` above
         self._proc = subprocess.Popen(self.launch_cmd)
         logger.info("supervised process started: pid=%s cmd=%s", self._proc.pid, self.launch_cmd)
 
@@ -103,6 +108,7 @@ class ProcessSupervisor:
             self._proc.send_signal(signal.SIGKILL)
             self._proc.wait(timeout=10)
         self.start()
+        assert self._proc is not None  # start() just set it: we checked self.supervised above
         return {"restarted": True, "pid": self._proc.pid}
 
 
@@ -132,6 +138,20 @@ def create_app(
 
     app = FastAPI(title="SwiftServe Replica Sidecar", lifespan=lifespan)
 
+    @app.middleware("http")
+    async def _request_id_middleware(request: Request, call_next):
+        # The router always sets X-Request-Id before forwarding (see
+        # app.py); falling back to a fresh one here just means this sidecar
+        # is being hit directly (a chaos-runner admin call, a manual curl).
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        token = set_request_id(request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            reset_request_id(token)
+        response.headers["X-Request-Id"] = request_id
+        return response
+
     def _require_admin(x_chaos_token: str | None) -> None:
         if admin_token and x_chaos_token != admin_token:
             raise HTTPException(status_code=403, detail="invalid or missing X-Chaos-Token")
@@ -144,18 +164,21 @@ def create_app(
     async def chaos_partition(enabled: bool = True, x_chaos_token: str | None = Header(default=None)):
         _require_admin(x_chaos_token)
         chaos.partitioned = enabled
+        logger.info("chaos: partition=%s", enabled)
         return chaos.status()
 
     @app.post("/chaos/latency")
     async def chaos_latency(extra_ms: float = 0.0, x_chaos_token: str | None = Header(default=None)):
         _require_admin(x_chaos_token)
         chaos.extra_latency_ms = max(0.0, extra_ms)
+        logger.info("chaos: extra_latency_ms=%.1f", chaos.extra_latency_ms)
         return chaos.status()
 
     @app.post("/chaos/error-rate")
     async def chaos_error_rate(rate: float = 0.0, x_chaos_token: str | None = Header(default=None)):
         _require_admin(x_chaos_token)
         chaos.error_rate = min(1.0, max(0.0, rate))
+        logger.info("chaos: error_rate=%.2f", chaos.error_rate)
         return chaos.status()
 
     @app.post("/chaos/reset")
@@ -164,16 +187,19 @@ def create_app(
         chaos.partitioned = False
         chaos.extra_latency_ms = 0.0
         chaos.error_rate = 0.0
+        logger.info("chaos: reset")
         return chaos.status()
 
     @app.post("/chaos/kill")
     async def chaos_kill(x_chaos_token: str | None = Header(default=None)):
         _require_admin(x_chaos_token)
+        logger.warning("chaos: kill requested")
         return supervisor.kill()
 
     @app.post("/chaos/restart")
     async def chaos_restart(x_chaos_token: str | None = Header(default=None)):
         _require_admin(x_chaos_token)
+        logger.warning("chaos: restart requested")
         return supervisor.restart()
 
     @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])

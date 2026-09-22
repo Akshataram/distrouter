@@ -17,7 +17,7 @@ import asyncio
 import logging
 import random
 import time
-from typing import Callable
+from collections.abc import Callable
 
 import httpx
 from fastapi import Response
@@ -72,6 +72,7 @@ async def forward_chat_completion(
     on_complete: Callable[[float, bool], None],
     max_retries: int = 2,
     retry_base_delay_s: float = 0.1,
+    occupancy_at_dispatch: int = 0,
 ) -> Response:
     """``on_complete(latency_ms, success)`` fires exactly once, when the
     upstream call is fully done -- immediately for a non-streaming response
@@ -79,7 +80,14 @@ async def forward_chat_completion(
     for a streaming one, so ``latency_ms`` is always true end-to-end
     latency rather than time-to-first-byte. The caller uses it to release
     the in-flight slot / admission-control permit and record metrics at the
-    right time; callers must not release those themselves."""
+    right time; callers must not release those themselves.
+
+    ``occupancy_at_dispatch`` is the replica's queue_depth() at the moment
+    this request was chosen (before this request's own count was added) --
+    it's passed straight through to ``record_completion_latency`` so the
+    observed latency calibrates the occupancy bucket this request actually
+    ran under, not the occupancy at completion time (which includes
+    whatever else was dispatched in the meantime)."""
     upstream_url = f"{replica.base_url}{path}"
     start = time.monotonic()
     max_attempts = max_retries + 1
@@ -108,7 +116,7 @@ async def forward_chat_completion(
             finally:
                 elapsed_ms = (time.monotonic() - start) * 1000.0
                 await upstream_response.aclose()
-                replica.record_completion_latency(elapsed_ms)
+                replica.record_completion_latency(elapsed_ms, occupancy_at_dispatch=occupancy_at_dispatch)
                 success = not stream_failed and upstream_response.status_code < 500
                 if success:
                     replica.circuit.record_success()
@@ -137,7 +145,7 @@ async def forward_chat_completion(
         raise
 
     elapsed_ms = (time.monotonic() - start) * 1000.0
-    replica.record_completion_latency(elapsed_ms)
+    replica.record_completion_latency(elapsed_ms, occupancy_at_dispatch=occupancy_at_dispatch)
     success = upstream_response.status_code < 500
     if success:
         replica.circuit.record_success()
@@ -147,8 +155,22 @@ async def forward_chat_completion(
 
     response_headers = {k: v for k, v in upstream_response.headers.items() if k.lower() not in _HOP_BY_HOP_HEADERS}
     response_headers["X-SwiftServe-Replica"] = str(replica.replica_id)
+    try:
+        content = upstream_response.json()
+    except ValueError:
+        # Upstream didn't actually return JSON (a broken replica, an error
+        # page from an intermediate proxy, an empty body): pass the raw
+        # bytes through with the upstream's real content-type instead of
+        # crashing here, now that success/failure has already been recorded
+        # correctly above based on the HTTP status code alone.
+        return Response(
+            content=upstream_response.content,
+            status_code=upstream_response.status_code,
+            headers=response_headers,
+            media_type=upstream_response.headers.get("content-type"),
+        )
     return JSONResponse(
-        content=upstream_response.json(),
+        content=content,
         status_code=upstream_response.status_code,
         headers=response_headers,
     )

@@ -65,6 +65,7 @@ pip install -r requirements.txt
 export SWIFTSERVE_MODEL=Qwen/Qwen2.5-7B-Instruct
 export SWIFTSERVE_REPLICAS=http://localhost:8001,http://localhost:8002,http://localhost:8003
 export SWIFTSERVE_POLICY=swiftserve   # or round_robin / least_connections for A/B comparison
+# export SWIFTSERVE_API_TOKEN=some-real-secret   # optional; unset = unauthenticated (see "Notes" below)
 uvicorn swiftserve.app:app --host 0.0.0.0 --port 8000
 ```
 
@@ -92,9 +93,12 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"Qwen/Qwen2.5-7B-Instruct","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-The response carries `X-SwiftServe-Replica` (which replica handled it) and
+The response carries `X-SwiftServe-Replica` (which replica handled it),
 `X-SwiftServe-Cache-Hit` (`true` if SwiftServe believed that session's cache
-was warm on the chosen replica) for observability.
+was warm on the chosen replica), and `X-Request-Id` (generated if you
+didn't send one) for observability -- grep the router's and the sidecar's
+logs for `[rid=<that id>]` to trace one request across both processes.
+If `SWIFTSERVE_API_TOKEN` is set, add `-H 'Authorization: Bearer <token>'`.
 
 ## 5. Benchmark: SwiftServe vs. round-robin vs. least-connections
 
@@ -105,15 +109,22 @@ python scripts/load_test.py --router-url http://localhost:8000 \
   --num-sessions 50 --turns 4 --concurrency 10 --sla-ms 2000
 ```
 
-It reports real observed latency (mean/p50/p95/p99), cache-hit rate, SLA
-violation rate, and the request distribution across replicas.
+It reports real observed latency (mean/p50/p90/p95/p99), cache-hit rate,
+SLA violation rate, and the request distribution across replicas. A
+percentile prints `(unreliable: n=.., want >=..)` instead of a bare number
+when the run didn't produce enough samples for that percentile's tail to
+mean anything -- p99 in particular needs real volume (~1000+ requests) to
+be more than a restatement of the single largest observation; see
+`ARCHITECTURE.md` section 6 for the exact rule.
 
 **For anything you'd defend in front of a panel, use `scripts/benchmark.py`
 instead** -- one run of `load_test.py` can make round-robin look better or
 worse than SwiftServe purely from scheduling jitter. `benchmark.py` runs
 several independent trials (different seeds) per policy and reports a
 bootstrap confidence interval plus a permutation-test significance check
-between policies:
+between policies -- including a bootstrap 95% CI on each latency
+percentile itself (not just the mean), with an unreliable one flagged `*`
+in the comparison table rather than hidden:
 
 ```bash
 # once per policy, against a router already configured with that policy
@@ -130,6 +141,33 @@ python scripts/benchmark.py run --router-url http://localhost:8002 \
 
 python scripts/benchmark.py compare reports/*.json
 ```
+
+**For "how much load can this actually take" (DistServe's Goodput
+metric), use `scripts/benchmark.py goodput`** instead of either of the
+above -- `run`/`compare` measure latency at a load level you pick
+(`--concurrency`); `goodput` sweeps *offered* load itself (an open-loop
+Poisson arrival process, independent of how fast the system responds) to
+find the highest request rate sustaining a target SLA-attainment
+percentage:
+
+```bash
+python scripts/benchmark.py goodput --router-url http://localhost:8000 \
+  --policy-label swiftserve --rps-levels 5,10,15,20,25,30 \
+  --duration-s 20 --turns 4 --sla-ms 2000 --sla-target 0.9 \
+  --output reports/goodput_swiftserve.json
+
+python scripts/benchmark.py goodput --router-url http://localhost:8001 \
+  --policy-label round_robin --rps-levels 5,10,15,20,25,30 \
+  --duration-s 20 --turns 4 --sla-ms 2000 --sla-target 0.9 \
+  --output reports/goodput_round_robin.json
+
+python scripts/benchmark.py goodput-compare reports/goodput_*.json
+```
+
+The report prints a per-RPS-level table (offered/completed requests, SLA
+attainment, mean/p95 latency) and the resulting Goodput@90 -- the highest
+*tested* RPS that actually cleared the target, never an interpolated
+guess, and honestly `None` if no tested level cleared it.
 
 ## 6. Real multi-node deployment (Colab / Kaggle, no local GPU needed)
 
@@ -189,15 +227,20 @@ this is not new-to-you code the first time you run it live.
 
 ## Notes / production hardening
 
-- The router's `/v1/chat/completions` itself still has no auth or TLS
-  termination -- put it behind a real ingress/load balancer or add auth
-  middleware before exposing it beyond a trusted network. (The admission
-  controller is backpressure, not rate limiting or authorization: it
-  protects the cluster from being overwhelmed, it doesn't gate who's
-  allowed to send requests.) The replica sidecar's `/chaos/*` API is
-  bearer-token gated (`--admin-token` / `SIDECAR_ADMIN_TOKEN`) since it's
-  reachable at a public tunnel URL in the multi-node deployment -- always
-  set a real token for anything beyond a private demo.
+- The router's `/v1/chat/completions`, `/status`, and `/metrics` are
+  bearer-token gated when `SWIFTSERVE_API_TOKEN` is set (unset by default,
+  matching the original unauthenticated behavior) -- set a real token and
+  send `Authorization: Bearer <token>` for anything beyond a private demo.
+  `/healthz` always stays open for load-balancer probes. This still isn't
+  TLS termination or rate limiting -- put the router behind a real
+  ingress/load balancer for that. (The admission controller is
+  backpressure, not authorization: it protects the cluster from being
+  overwhelmed, it doesn't gate who's allowed to send requests.) The
+  replica sidecar's `/chaos/*` API is separately bearer-token gated
+  (`--admin-token` / `SIDECAR_ADMIN_TOKEN`) since it's reachable at a
+  public tunnel URL in the multi-node deployment -- always set a real
+  token for anything beyond a private demo, on both the router and every
+  sidecar.
 - `SWIFTSERVE_CIRCUIT_FAILURE_THRESHOLD` / `_CIRCUIT_RESET_S` /
   `_CIRCUIT_MAX_RESET_S` tune the per-replica circuit breaker;
   `SWIFTSERVE_MAX_IN_FLIGHT` tunes the global admission ceiling.
@@ -209,6 +252,16 @@ this is not new-to-you code the first time you run it live.
 - `SWIFTSERVE_CACHE_TTL_S` controls how long SwiftServe keeps believing a
   session's cache is warm on a replica after its last request; tune it
   against how long vLLM's own prefix cache actually stays resident under
-  your memory pressure and traffic mix.
+  your memory pressure and traffic mix. The cross-session prefix trie
+  (`ARCHITECTURE.md` section 8) uses the same TTL.
+- `SWIFTSERVE_PREFIX_TRIE_MAX_DEPTH` (default 6) caps how many messages
+  the cross-session prefix trie compares -- only early turns (system
+  prompts, few-shot examples) are realistically shared verbatim across
+  independent conversations.
+- `SWIFTSERVE_COLD_START_MS_PER_TOKEN` (default `0.0`, off) prices the
+  routing fallback's estimate of recomputing a cold prefix on a per-token
+  basis; leave it at 0 unless you've actually measured your replicas'
+  prefill throughput (see `ARCHITECTURE.md` section 9 for why this isn't
+  self-calibrated the way batch capacity is).
 - Scaling past 3 replicas only requires adding more URLs to
   `SWIFTSERVE_REPLICAS`; nothing else in the routing logic is hardcoded to 3.

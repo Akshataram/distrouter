@@ -16,7 +16,7 @@ and once from a test that also imports the app fresh -- never raises a
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 

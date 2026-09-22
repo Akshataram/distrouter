@@ -24,6 +24,21 @@ concurrency this replica has actually been observed running (a high-water
 mark from scraped vLLM metrics, seeded by a configurable floor that
 defaults to 1), so the model self-calibrates from real telemetry instead of
 requiring the deployer to know vLLM's `--max-num-seqs` in advance.
+
+Below capacity, "roughly its own service time" is itself occupancy-
+dependent in real vLLM: per-token generation does slow down somewhat as
+more sequences share GPU compute and memory bandwidth concurrently, so a
+request landing on an already-busy-but-not-full batch runs slower than one
+landing on an idle replica, even though neither one queues. Rather than
+one flat `ewma_latency_ms` for every occupancy level below capacity, each
+replica tracks a separate EWMA per occupancy bucket (`_bucket_latency_ms`,
+bucketed by how full the batch was, as a fraction of capacity, at dispatch
+time) and `estimate_latency_ms()` reads the bucket matching the occupancy
+a new request would actually land into. A bucket with no observations yet
+falls back to the replica's overall `ewma_latency_ms`, so with little data
+this collapses back to exactly the flat estimate -- the per-bucket model
+only sharpens the estimate once real per-occupancy data exists, it never
+makes an under-informed guess look more confident than it is.
 """
 
 from __future__ import annotations
@@ -36,6 +51,7 @@ from swiftserve.resilience import CircuitBreaker
 
 _METRICS_FRESHNESS_S = 5.0
 _MAX_TRACKED_SESSIONS = 20_000
+_NUM_OCCUPANCY_BUCKETS = 3
 
 
 @dataclass
@@ -58,6 +74,7 @@ class ReplicaState:
         circuit_reset_timeout_s: float = 10.0,
         circuit_max_reset_timeout_s: float = 120.0,
         assumed_max_batch_size: int = 1,
+        cold_start_ms_per_token: float = 0.0,
     ):
         self.replica_id = replica_id
         self.base_url = base_url
@@ -66,13 +83,16 @@ class ReplicaState:
         self.metrics = ScrapedMetrics()
         self.ewma_latency_ms = seed_latency_ms
         self.max_batch_size = assumed_max_batch_size
+        self.cold_start_ms_per_token = cold_start_ms_per_token
         self._observed_max_concurrency = 0
+        self._bucket_latency_ms = [seed_latency_ms] * _NUM_OCCUPANCY_BUCKETS
+        self._bucket_observed = [False] * _NUM_OCCUPANCY_BUCKETS
         self.circuit = CircuitBreaker(
             failure_threshold=circuit_failure_threshold,
             reset_timeout_s=circuit_reset_timeout_s,
             max_reset_timeout_s=circuit_max_reset_timeout_s,
         )
-        self._session_last_used: "OrderedDict[str, float]" = OrderedDict()
+        self._session_last_used: OrderedDict[str, float] = OrderedDict()
 
     # -- load signals ---------------------------------------------------
 
@@ -90,22 +110,71 @@ class ReplicaState:
         happened to be low the last time we scraped."""
         return max(self.max_batch_size, self._observed_max_concurrency, 1)
 
+    def estimate_cold_start_penalty_ms(self, prefix_size_tokens: int) -> float:
+        """Extra expected latency from recomputing prefix_size_tokens of
+        prior conversation context on this replica, on top of
+        estimate_latency_ms()'s current-load estimate -- the MoonCake/
+        Preble observation that a cache miss isn't free, and its cost
+        scales with how much context must be recomputed. Modeled as a
+        flat per-token rate (cold_start_ms_per_token, default 0.0 = off)
+        rather than self-calibrated from observed data like
+        effective_batch_capacity: isolating "extra time from a cold
+        prefix" from "extra time from current load" isn't something
+        SwiftServe can cleanly observe per-request, so a fabricated
+        auto-learned curve here would be overclaiming, not a refinement.
+        A deployer who has actually measured their replicas' prefill
+        throughput can set SWIFTSERVE_COLD_START_MS_PER_TOKEN accordingly."""
+        return self.cold_start_ms_per_token * prefix_size_tokens
+
+    def _occupancy_bucket(self, occupancy: int) -> int:
+        """Which occupancy bucket a request landing at this concurrency
+        level falls into, as a fraction of effective_batch_capacity() --
+        bucket boundaries move with the learned capacity instead of being
+        fixed request counts, so they stay meaningful as capacity is
+        revised upward from scraped telemetry."""
+        capacity = self.effective_batch_capacity()
+        ratio = occupancy / capacity
+        bucket = int(ratio * _NUM_OCCUPANCY_BUCKETS)
+        return min(max(bucket, 0), _NUM_OCCUPANCY_BUCKETS - 1)
+
+    def _bucket_estimate(self, bucket: int) -> float:
+        if self._bucket_observed[bucket]:
+            return self._bucket_latency_ms[bucket]
+        return self.ewma_latency_ms
+
     def estimate_latency_ms(self) -> float:
         """Projected latency if a request were dispatched here right now,
         modeling the replica as an M/M/c queue (c = effective_batch_capacity)
         rather than M/M/1: below capacity, continuous batching means a new
-        request runs alongside the others at roughly its own service time;
-        at or above capacity, it queues, and slots free up at rate c rather
-        than 1. Setting c=1 (the default until real concurrency is observed)
-        collapses this back to the plain serial-queue estimate."""
+        request runs alongside the others without queueing -- but its
+        service time still depends on how full the batch already is (see
+        module docstring), so this reads the per-occupancy-bucket estimate
+        rather than one flat value. At or above capacity, it genuinely
+        queues, using the busiest bucket's service time as the rate at
+        which slots free up. Setting c=1 with no bucket data yet collapses
+        this back to the plain serial-queue estimate."""
         depth = self.queue_depth()
         capacity = self.effective_batch_capacity()
         if depth < capacity:
-            return self.ewma_latency_ms
-        return self.ewma_latency_ms * (depth + 1) / capacity
+            return self._bucket_estimate(self._occupancy_bucket(depth))
+        service_time_ms = self._bucket_estimate(_NUM_OCCUPANCY_BUCKETS - 1)
+        return service_time_ms * (depth + 1) / capacity
 
-    def record_completion_latency(self, latency_ms: float, alpha: float = 0.2) -> None:
+    def record_completion_latency(self, latency_ms: float, occupancy_at_dispatch: int = 0, alpha: float = 0.2) -> None:
+        """`occupancy_at_dispatch` is how many other requests were already
+        running on this replica when this one was dispatched (i.e.
+        queue_depth() sampled right before this request was added) -- it's
+        what determines which occupancy bucket this observation calibrates.
+        A bucket's first real sample seeds it directly rather than EWMA-
+        blending against the generic seed_latency_ms default, so one
+        observation is enough to start sharpening that bucket's estimate."""
         self.ewma_latency_ms = alpha * latency_ms + (1 - alpha) * self.ewma_latency_ms
+        bucket = self._occupancy_bucket(occupancy_at_dispatch)
+        if self._bucket_observed[bucket]:
+            self._bucket_latency_ms[bucket] = alpha * latency_ms + (1 - alpha) * self._bucket_latency_ms[bucket]
+        else:
+            self._bucket_latency_ms[bucket] = latency_ms
+            self._bucket_observed[bucket] = True
 
     def record_scrape(self, running: int, waiting: int, gpu_cache_usage_perc: float) -> None:
         self.metrics.running = running
@@ -141,6 +210,10 @@ class ReplicaState:
             "scraped_waiting": self.metrics.waiting,
             "gpu_cache_usage_perc": round(self.metrics.gpu_cache_usage_perc, 3),
             "ewma_latency_ms": round(self.ewma_latency_ms, 1),
+            "occupancy_bucket_latency_ms": [
+                round(self._bucket_latency_ms[i], 1) if self._bucket_observed[i] else None
+                for i in range(_NUM_OCCUPANCY_BUCKETS)
+            ],
             "effective_batch_capacity": self.effective_batch_capacity(),
             "tracked_sessions": len(self._session_last_used),
             "circuit": self.circuit.status(),

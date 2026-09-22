@@ -15,6 +15,7 @@ we only need three gauge families.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 
@@ -65,7 +66,7 @@ async def scrape_loop(replicas: list[ReplicaState], interval_s: float, stop_even
     async with httpx.AsyncClient() as client:
         while not stop_event.is_set():
             await asyncio.gather(*(scrape_once(client, r) for r in replicas))
-            try:
+            # asyncio.TimeoutError specifically (not bare TimeoutError): they're
+            # only the same class from Python 3.11 on, and this project targets 3.10+.
+            with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
-            except asyncio.TimeoutError:
-                pass

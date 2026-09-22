@@ -7,3 +7,35 @@ requires-python = ">=3.10"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+# notebooks/ is a Colab/Kaggle notebook full of shell-magic and install
+# cells (`!pip install ...`), not ordinary importable Python -- it's
+# exercised by actually running it on a GPU, not by static analysis.
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# Long docstring/comment lines are this codebase's house style (prose
+# explanations of *why*, not just *what*) and line-length is already
+# relaxed to 120 above; don't fight that in the linter too.
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["swiftserve"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+# Not fully strict: this is a small async service with FastAPI/httpx
+# dependencies whose stubs aren't complete enough to make --strict
+# meaningful signal rather than noise. check_untyped_defs + explicit
+# ignores below catch the real class of bug (a genuine type mismatch)
+# without demanding annotations on every local variable.
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "prometheus_client.*"
+ignore_missing_imports = true

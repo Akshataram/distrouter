@@ -44,6 +44,18 @@ class Settings:
     proxy_max_retries: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_PROXY_MAX_RETRIES", "2")))
     proxy_retry_base_delay_s: float = field(default_factory=lambda: float(os.environ.get("SWIFTSERVE_PROXY_RETRY_BASE_DELAY_S", "0.1")))
     assumed_max_batch_size: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_ASSUMED_MAX_BATCH_SIZE", "1")))
+    # Unset (default) means the router's own API is unauthenticated -- fine
+    # for a private demo, not for anything exposed beyond a trusted network.
+    # Mirrors replica_sidecar.py's SIDECAR_ADMIN_TOKEN / X-Chaos-Token pattern.
+    api_token: str | None = field(default_factory=lambda: os.environ.get("SWIFTSERVE_API_TOKEN") or None)
+    # 0.0 (default) = off: the routing fallback ignores prefix length until
+    # a deployer sets this from their own replicas' measured prefill
+    # throughput. Deliberately a configured constant, not self-calibrated
+    # like assumed_max_batch_size -- isolating "extra time from a cold
+    # prefix" from "extra time from current load" isn't observable from
+    # data SwiftServe already collects. See ReplicaState.estimate_cold_start_penalty_ms.
+    cold_start_ms_per_token: float = field(default_factory=lambda: float(os.environ.get("SWIFTSERVE_COLD_START_MS_PER_TOKEN", "0.0")))
+    prefix_trie_max_depth: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_PREFIX_TRIE_MAX_DEPTH", "6")))
 
 
 settings = Settings()
