@@ -61,6 +61,13 @@ class ScrapedMetrics:
     gpu_cache_usage_perc: float = 0.0
     last_scraped_monotonic: float = 0.0
     healthy: bool = False
+    # Raw cumulative counters straight from vLLM's own Prometheus output
+    # (vllm:prefix_cache_hits / vllm:prefix_cache_queries) -- vLLM's ground
+    # truth for whether its prefix cache actually served a request,
+    # independent of (and a check against) SwiftServe's own has_warm_cache()
+    # prediction.
+    prefix_cache_hits: float = 0.0
+    prefix_cache_queries: float = 0.0
 
 
 class ReplicaState:
@@ -176,12 +183,37 @@ class ReplicaState:
             self._bucket_latency_ms[bucket] = latency_ms
             self._bucket_observed[bucket] = True
 
-    def record_scrape(self, running: int, waiting: int, gpu_cache_usage_perc: float) -> None:
+    def record_scrape(
+        self,
+        running: int,
+        waiting: int,
+        gpu_cache_usage_perc: float,
+        prefix_cache_hits: float | None = None,
+        prefix_cache_queries: float | None = None,
+    ) -> None:
         self.metrics.running = running
         self.metrics.waiting = waiting
         self.metrics.gpu_cache_usage_perc = gpu_cache_usage_perc
+        if prefix_cache_hits is not None:
+            self.metrics.prefix_cache_hits = prefix_cache_hits
+        if prefix_cache_queries is not None:
+            self.metrics.prefix_cache_queries = prefix_cache_queries
         self.metrics.last_scraped_monotonic = time.monotonic()
         self._observed_max_concurrency = max(self._observed_max_concurrency, running)
+
+    @property
+    def true_prefix_hit_rate(self) -> float | None:
+        """vLLM's own reported prefix-cache hit rate for this replica:
+        cumulative hits / cumulative queries, straight from its Prometheus
+        counters -- no delta math needed since both are already
+        monotonically-increasing cumulative totals and their ratio is
+        stable regardless of scrape interval. None (not 0.0) when there's
+        no query volume yet to compute a rate from, or this vLLM version
+        doesn't expose these metrics at all (both counters stay at their
+        0.0 default)."""
+        if self.metrics.prefix_cache_queries > 0:
+            return self.metrics.prefix_cache_hits / self.metrics.prefix_cache_queries
+        return None
 
     # -- cache affinity heatmap -----------------------------------------
 
@@ -210,6 +242,7 @@ class ReplicaState:
             "scraped_waiting": self.metrics.waiting,
             "gpu_cache_usage_perc": round(self.metrics.gpu_cache_usage_perc, 3),
             "ewma_latency_ms": round(self.ewma_latency_ms, 1),
+            "true_prefix_hit_rate": round(self.true_prefix_hit_rate, 4) if self.true_prefix_hit_rate is not None else None,
             "occupancy_bucket_latency_ms": [
                 round(self._bucket_latency_ms[i], 1) if self._bucket_observed[i] else None
                 for i in range(_NUM_OCCUPANCY_BUCKETS)

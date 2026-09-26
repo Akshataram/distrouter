@@ -4,12 +4,23 @@ vLLM's OpenAI-compatible server exposes `/health` and a `/metrics` endpoint
 in Prometheus text format including (name may vary slightly by vLLM
 version):
 
-    vllm:num_requests_running{...}  <float>
-    vllm:num_requests_waiting{...}  <float>
-    vllm:gpu_cache_usage_perc{...}  <float>
+    vllm:num_requests_running{...}       <float>
+    vllm:num_requests_waiting{...}       <float>
+    vllm:gpu_cache_usage_perc{...}       <float>
+    vllm:prefix_cache_hits{...}          <float>  (counter; some vLLM
+    vllm:prefix_cache_queries{...}       <float>   versions name these
+                                                    with a `_total` suffix)
 
 We do a minimal text-format parse (no `prometheus_client` dependency) since
-we only need three gauge families.
+we only need a handful of gauge/counter families.
+
+prefix_cache_hits/queries are vLLM's own ground truth for whether its
+prefix cache actually served a request from cache -- unlike SwiftServe's
+own has_warm_cache()/X-SwiftServe-Cache-Hit, which is only ever the
+router's *prediction* (it can be wrong: vLLM may have evicted the blocks
+under memory pressure since the router last saw this session). Scraping
+these two counters and taking their ratio (ReplicaState.true_prefix_hit_rate)
+gives a real signal to check the prediction against, per replica.
 """
 
 from __future__ import annotations
@@ -29,6 +40,11 @@ _GAUGE_PATTERNS = {
     "running": re.compile(r"^vllm:num_requests_running(?:\{[^}]*\})?\s+([0-9.eE+-]+)", re.MULTILINE),
     "waiting": re.compile(r"^vllm:num_requests_waiting(?:\{[^}]*\})?\s+([0-9.eE+-]+)", re.MULTILINE),
     "gpu_cache": re.compile(r"^vllm:gpu_cache_usage_perc(?:\{[^}]*\})?\s+([0-9.eE+-]+)", re.MULTILINE),
+    # `(?:_total)?` handles both spellings across vLLM versions: some ship
+    # these as plain gauges (`vllm:prefix_cache_hits`), others as counters
+    # with the standard Prometheus `_total` suffix.
+    "prefix_cache_hits": re.compile(r"^vllm:prefix_cache_hits(?:_total)?(?:\{[^}]*\})?\s+([0-9.eE+-]+)", re.MULTILINE),
+    "prefix_cache_queries": re.compile(r"^vllm:prefix_cache_queries(?:_total)?(?:\{[^}]*\})?\s+([0-9.eE+-]+)", re.MULTILINE),
 }
 
 
@@ -57,6 +73,8 @@ async def scrape_once(client: httpx.AsyncClient, replica: ReplicaState) -> None:
                 running=int(parsed.get("running", replica.metrics.running)),
                 waiting=int(parsed.get("waiting", replica.metrics.waiting)),
                 gpu_cache_usage_perc=parsed.get("gpu_cache", replica.metrics.gpu_cache_usage_perc),
+                prefix_cache_hits=parsed.get("prefix_cache_hits", replica.metrics.prefix_cache_hits),
+                prefix_cache_queries=parsed.get("prefix_cache_queries", replica.metrics.prefix_cache_queries),
             )
     except httpx.HTTPError as exc:
         logger.warning("metrics scrape failed for replica %s: %s", replica.replica_id, exc)

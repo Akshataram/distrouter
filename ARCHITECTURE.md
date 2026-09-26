@@ -382,6 +382,111 @@ overclaiming this project avoids everywhere else. A deployer who has
 actually measured their own replicas' prefill throughput can set it from
 that.
 
+## 10. Phase 0: measurement and workloads that can actually show a cache-routing gain
+
+Before this change, every benchmark run -- `scripts/benchmark.py`,
+`scripts/load_test.py`, the numbers in this doc -- ran against 5 tiny
+canned prompts (~15 tokens, no system prompt) with `max_tokens=128`, and
+measured only end-to-end latency. That workload has essentially nothing
+to cache (P1), and e2e latency mixes generation time (which caching never
+speeds up) in with prompt-processing time (which caching does speed up),
+hiding whatever gain a cache-aware policy actually produces (P2). It's not
+that `swiftserve` failed to beat `least_connections` on that workload --
+it's that *no routing policy could have*, on a workload with no shared
+prefix structure. Phase 0 (of a larger routing-upgrade plan; see the
+DistServe/Preble/MoonCake framing below, which this phase directly
+motivates) fixes the measurement, not the routing.
+
+**`scripts/workloads.py`** (new, shared by `benchmark.py` and
+`load_test.py`, replacing both scripts' copy-pasted `PROMPTS`/`run_session`):
+four deterministic generators. `shared_system_prompt` (Preble's own
+workload shape) assigns each of N sessions to one of a handful of
+long-system-prompt "apps" via Zipf-skewed popularity, so a cache-aware
+policy has real cross-session shared prefixes to route on.
+`long_document_qa` is DistServe's own shape: many questions against the
+same long document. `sharegpt_multiturn` loads a real local ShareGPT-format
+trace when one is available (no synthetic substitute for real conversation
+shape). `tiny_prompts` is the original 5-prompt workload, kept verbatim as
+a regression baseline -- `--workload tiny` (the default) is intentionally
+unchanged behavior. The one subtlety that keeps prefix caching honest:
+turn 0 sends the full seed messages, but turn N>0 sends *only* the new
+user message, never a pre-scripted assistant turn -- the request runner
+appends each turn's real, live-streamed assistant reply before sending the
+next turn, so the bytes vLLM actually sees match what it actually
+generated and cached (a scripted fake reply would silently break the real
+prefix match after turn 0).
+
+**Streaming + real per-request metrics** (`scripts/benchmark.py`): every
+request now always sets `"stream": true` with
+`"stream_options": {"include_usage": true}` (P2's actual fix). A new pure
+function, `parse_sse_stream`, turns the raw SSE lines into `ttft_ms` (time
+to first content token), `tpot_ms` (time between subsequent tokens), and
+the usage fields vLLM reports in its final chunk -- `prompt_tokens`,
+`completion_tokens`, and `prompt_tokens_details.cached_tokens` (null
+treated as 0, since not every vLLM build/flag combination reports it).
+`summarize_policy` gained TTFT p50/p90/p99 and TPOT p50/p99 (bootstrap
+CI'd, same as existing e2e percentiles), plus three metrics that didn't
+exist before because nothing fed them real data:
+
+- **`goodput_rate`** (`dual_slo_attainment`): DistServe's actual
+  definition of goodput -- the fraction of requests meeting *both* a TTFT
+  SLO and a TPOT SLO, not just a single end-to-end number (P7).
+- **`true_cache_ratio`**: Σ`cached_tokens` / Σ`prompt_tokens`, straight
+  from vLLM's own reported usage -- addresses P3 directly. SwiftServe's
+  `X-SwiftServe-Cache-Hit` header is still only ever the router's
+  *prediction* (it can be wrong: vLLM may have evicted those blocks under
+  memory pressure since the router last routed there); this is the number
+  to check that prediction against, and Phase 0 wires the comparison
+  without yet changing what predicts it.
+- **`prediction_error`**: mean `|predicted_cached_tokens - cached_tokens|
+  / prompt_tokens`. `X-SwiftServe-Predicted-Cached-Tokens` is wired
+  end-to-end (client records it, `_build_trial` computes the error) but
+  the router doesn't populate it yet -- it defaults to 0, so this number
+  is currently just "how much true_cache_ratio differs from zero," which
+  is honest, not a real prediction-accuracy result. A later phase that
+  adds an actual cache-size predictor makes this number meaningful; Phase
+  0 only wires the plumbing.
+
+Also new: **`load_imbalance`** (max/mean requests-per-replica, pooled
+across trials) and **`--rate`** on `benchmark.py run` (each seed becomes
+one open-loop Poisson-arrival window over the chosen workload's sessions,
+reusing the same arrival-generation machinery `goodput` already had,
+instead of only closed-loop concurrency). `compare`'s permutation test now
+runs pairwise on TTFT and goodput-rate in addition to e2e latency
+(generalized into one `_print_pairwise_permutation` helper instead of
+three copy-pasted blocks).
+
+**`swiftserve/metrics_scraper.py`** now also parses
+`vllm:prefix_cache_hits`/`vllm:prefix_cache_queries` (optional `_total`
+suffix -- the spelling differs across vLLM versions), and
+`ReplicaState.true_prefix_hit_rate` exposes their ratio in `/status` and as
+a new Prometheus gauge (`swiftserve_replica_true_prefix_hit_rate`, only
+set when there's real query volume -- never faked to 0). This is vLLM's
+own ground truth for whether *its* prefix cache is actually being hit,
+independent of and complementary to `true_cache_ratio` above (that one is
+per-request, from `usage`; this one is cumulative, from vLLM's own
+counters) -- two independent checks on the same prediction.
+
+**Deployment**: `DEPLOYMENT.md` and `notebooks/gpu_node.ipynb` now suggest
+`Qwen/Qwen2.5-3B-Instruct` on a free T4 (was 0.5B) specifically so prefill
+is large enough to be a measurable cost rather than noise next to
+generation time, plus `--enable-prompt-tokens-details` (without it, vLLM
+never reports `cached_tokens` at all, so `true_cache_ratio` would silently
+stay zero) and T4-appropriate `--block-size 16 --max-num-seqs 32
+--max-model-len 8192 --dtype half`. `deploy/run_replicas.sh` gets the same
+four flags; its own default model stays the larger 7B (it targets a real
+multi-GPU box, where prefill was never the tiny fraction it is on a T4).
+
+**Papers this phase is motivated by**: DistServe (arXiv:2401.09670,
+goodput's actual definition), Preble (arXiv:2407.00023, the
+shared-system-prompt/Zipf workload shape and the "gains only show up on
+workloads with real shared prefixes" finding that makes Phase 0 come
+before any routing change), and MoonCake (FAST'25, `cached_tokens` as
+ground truth to check a router's own prediction against). None of these
+change routing behavior yet -- `round_robin`, `least_connections`, and
+`swiftserve` all still choose exactly as before; this phase only changes
+what gets measured and what workload it's measured against.
+
 ## Where this sits relative to DistServe / MoonCake / Preble / llm-d
 
 Three papers, mapped honestly to what's real in this repo vs. what would

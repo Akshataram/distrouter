@@ -31,6 +31,15 @@ open-loop request rate a policy sustains while at least N% of requests
 both succeed and meet their SLA -- an orthogonal question to "how fast is
 a typical request at a fixed load" (what `run`/`compare` answer). See the
 `goodput` / `goodput-compare` subcommands below.
+
+Workloads (scripts/workloads.py): by default `run`/`goodput` still send
+the original 5 canned prompts (--workload tiny, unchanged behavior). The
+other --workload choices (shared_system, long_doc, sharegpt) generate
+sessions with real shared-prefix structure across sessions -- multi-tenant
+system prompts, long-document Q&A, real multi-turn traces -- so a
+cache-affinity-aware policy actually has shared prefixes to exploit, and
+this harness can report whether it does (true_cache_ratio) rather than
+only end-to-end latency.
 """
 
 from __future__ import annotations
@@ -41,11 +50,30 @@ import json
 import math
 import random
 import statistics
+import sys
 import time
-import uuid
 from collections.abc import Callable
+from dataclasses import replace
+from pathlib import Path
 
 import httpx
+
+# Running this file directly (`python scripts/benchmark.py ...`, as
+# documented above) only puts scripts/ itself on sys.path, not the repo
+# root -- so `from scripts.workloads import ...` below would otherwise
+# only work under pytest (which already puts the repo root on sys.path).
+# Inserting the repo root explicitly makes both invocations work the same
+# way; this is the one import benchmark.py takes outside its own file
+# (workloads.py exists precisely to be shared, unlike PROMPTS below).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts.workloads import (  # noqa: E402
+    SessionRequests,
+    Workload,
+    WorkloadArgs,
+    build_workload,
+    poisson_arrivals,
+)
 
 # A percentile estimate is only as good as how many samples actually land
 # in its tail: p99 asks "what's typical of the worst 1%", which is
@@ -77,6 +105,19 @@ def min_samples_for_percentile(p: float) -> int:
     return max(20, math.ceil(_MIN_TAIL_SAMPLES / tail_fraction))
 
 
+def format_percentile(sorted_values: list[float], p: float) -> str:
+    """Human-readable single-run percentile display for scripts/load_test.py
+    (a single-shot tool with no bootstrap CI): flags a percentile as
+    unreliable inline rather than printing a falsely-precise number when
+    there aren't enough samples in its tail (see min_samples_for_percentile)."""
+    value = percentile(sorted_values, p)
+    min_n = min_samples_for_percentile(p)
+    n = len(sorted_values)
+    if n < min_n:
+        return f"{value:.1f}ms (unreliable: n={n}, want >={min_n})"
+    return f"{value:.1f}ms"
+
+
 def sla_attainment(results: list[dict], sla_ms: float) -> float:
     """Fraction of *offered* requests -- successes and failures alike --
     that both got a 200 and finished within sla_ms. This is the
@@ -90,6 +131,29 @@ def sla_attainment(results: list[dict], sla_ms: float) -> float:
     met = sum(
         1 for r in results
         if "latency_ms" in r and r.get("status") == 200 and r["latency_ms"] <= sla_ms
+    )
+    return met / len(results)
+
+
+def dual_slo_attainment(results: list[dict]) -> float:
+    """Same spirit as sla_attainment(), but for the two SLOs a real
+    streaming client actually cares about separately: TTFT (how long
+    until anything starts coming back) and TPOT (how fast tokens keep
+    arriving once they start) -- DistServe's own Goodput definition. A
+    request only counts as "met" if it succeeded AND both measurements
+    exist AND both are within their own SLO. Requests that don't carry
+    ttft_slo_ms/tpot_slo_ms at all (e.g. results from a workload that
+    never set them) never count as met -- there is no SLO to have met.
+    Still divides by *all* offered requests, errors included, for the
+    same reason as sla_attainment."""
+    if not results:
+        return 0.0
+    met = sum(
+        1 for r in results
+        if r.get("status") == 200
+        and r.get("ttft_ms") is not None and r.get("tpot_ms") is not None
+        and r.get("ttft_slo_ms") is not None and r.get("tpot_slo_ms") is not None
+        and r["ttft_ms"] <= r["ttft_slo_ms"] and r["tpot_ms"] <= r["tpot_slo_ms"]
     )
     return met / len(results)
 
@@ -111,6 +175,128 @@ PROMPTS = [
 ]
 
 
+def parse_sse_stream(lines: list[tuple[float, str]], request_start_t: float) -> dict:
+    """Parses one chat-completion SSE stream into timing + usage metrics.
+
+    ``lines`` is a list of (wall-clock monotonic time the line was
+    received, raw SSE line text) pairs -- kept as plain data (not an
+    async generator) so this stays a pure, synchronously-testable
+    function over a hand-built fake sequence, with the actual network
+    read happening in the caller.
+
+    ttft_ms is measured from ``request_start_t`` to the first chunk whose
+    delta carries actual content (the "time to first token" a real
+    caller experiences, not merely "time to first SSE event" -- some
+    servers send an empty role-only opening delta first). tpot_ms is the
+    average time between successive content tokens (last content chunk
+    time minus first, divided by completion_tokens-1) rather than a
+    per-chunk average, since each chunk can carry more or fewer than one
+    token. usage fields come from the final ``usage``-bearing chunk (sent
+    when the request asked for ``stream_options: {"include_usage": true}``);
+    a missing or null ``cached_tokens`` (a server that doesn't report it)
+    becomes 0, never a crash."""
+    content_parts: list[str] = []
+    first_content_t: float | None = None
+    last_content_t: float | None = None
+    usage: dict = {}
+
+    for t, raw_line in lines:
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if content:
+                content_parts.append(content)
+                if first_content_t is None:
+                    first_content_t = t
+                last_content_t = t
+        chunk_usage = chunk.get("usage")
+        if chunk_usage:
+            usage = chunk_usage
+
+    prompt_tokens = usage.get("prompt_tokens") or 0
+    completion_tokens = usage.get("completion_tokens") or 0
+    cached_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+
+    ttft_ms = (first_content_t - request_start_t) * 1000.0 if first_content_t is not None else None
+    tpot_ms = None
+    if first_content_t is not None and last_content_t is not None and completion_tokens:
+        tpot_ms = (last_content_t - first_content_t) * 1000.0 / max(completion_tokens - 1, 1)
+
+    return {
+        "content": "".join(content_parts),
+        "ttft_ms": ttft_ms,
+        "tpot_ms": tpot_ms,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cached_tokens": cached_tokens,
+    }
+
+
+async def _stream_chat_turn(
+    client: httpx.AsyncClient, router_url: str, model: str, session_id: str,
+    transcript: list[dict], max_tokens: int,
+) -> dict:
+    """Sends one turn's full ``transcript`` as a streaming chat-completion
+    request (``stream: true`` + ``stream_options.include_usage``) and
+    returns the parsed low-level result: status/replica/cache-hit
+    headers, parse_sse_stream's timing+usage fields, and the assistant's
+    full replied content (for the caller to append to its own transcript
+    before the next turn). On a transport-level failure, returns just
+    ``{"error": str(exc)}`` -- never partially-filled timing fields that
+    could be mistaken for a real (if degenerate) measurement."""
+    request_start = time.monotonic()
+    lines: list[tuple[float, str]] = []
+    try:
+        async with client.stream(
+            "POST",
+            f"{router_url}/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": transcript,
+                "max_tokens": max_tokens,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            },
+            headers={"X-Session-Id": session_id},
+            timeout=120.0,
+        ) as response:
+            status_code = response.status_code
+            replica = response.headers.get("x-swiftserve-replica")
+            cache_hit = response.headers.get("x-swiftserve-cache-hit")
+            predicted_cached_tokens = int(response.headers.get("x-swiftserve-predicted-cached-tokens") or 0)
+            async for raw_line in response.aiter_lines():
+                lines.append((time.monotonic(), raw_line))
+    except httpx.HTTPError as exc:
+        return {"error": str(exc)}
+
+    e2e_ms = (time.monotonic() - request_start) * 1000.0
+    parsed = parse_sse_stream(lines, request_start)
+    return {
+        "error": None,
+        "status": status_code,
+        "replica": replica,
+        "cache_hit": cache_hit,
+        "predicted_cached_tokens": predicted_cached_tokens,
+        "e2e_ms": e2e_ms,
+        "ttft_ms": parsed["ttft_ms"],
+        "tpot_ms": parsed["tpot_ms"],
+        "prompt_tokens": parsed["prompt_tokens"],
+        "completion_tokens": parsed["completion_tokens"],
+        "cached_tokens": parsed["cached_tokens"],
+        "content": parsed["content"],
+    }
+
+
 async def run_session(
     client: httpx.AsyncClient,
     router_url: str,
@@ -121,39 +307,92 @@ async def run_session(
     max_tokens: int,
     results: list[dict],
 ) -> None:
-    messages = []
+    """Legacy canned-prompt session runner (one of PROMPTS chosen at
+    random per turn, uniform SLA), preserved for run_open_loop_arrivals's
+    default (--workload-less) path and for run_goodput_sweep's default
+    behavior -- streams over SSE now (see _stream_chat_turn) but keeps
+    exactly the result fields this module's own tests
+    (test_benchmark_goodput.py) already assert on: latency_ms, status,
+    sla_violated, plus the new streaming fields riding alongside them."""
+    transcript: list[dict] = []
     for turn in range(num_turns):
-        messages.append({"role": "user", "content": random.choice(PROMPTS)})
-        start = time.monotonic()
-        try:
-            resp = await client.post(
-                f"{router_url}/v1/chat/completions",
-                json={"model": model, "messages": messages, "max_tokens": max_tokens},
-                headers={"X-Session-Id": session_id, "X-SLA-Ms": str(sla_ms)},
-                timeout=120.0,
-            )
-            elapsed_ms = (time.monotonic() - start) * 1000.0
-            results.append(
-                {
-                    "session_id": session_id,
-                    "turn": turn,
-                    "latency_ms": elapsed_ms,
-                    "status": resp.status_code,
-                    "replica": resp.headers.get("x-swiftserve-replica"),
-                    "cache_hit": resp.headers.get("x-swiftserve-cache-hit"),
-                    "sla_ms": sla_ms,
-                    # A non-200 (e.g. a 503 admission rejection) is never a
-                    # met SLA just because it came back fast -- SLA
-                    # attainment means the request actually succeeded AND
-                    # was fast enough, not merely "some response arrived".
-                    "sla_violated": resp.status_code != 200 or elapsed_ms > sla_ms,
-                }
-            )
-            if resp.status_code == 200:
-                reply = resp.json()["choices"][0]["message"]["content"]
-                messages.append({"role": "assistant", "content": reply})
-        except httpx.HTTPError as exc:
-            results.append({"session_id": session_id, "turn": turn, "error": str(exc)})
+        transcript.append({"role": "user", "content": random.choice(PROMPTS)})
+        turn_result = await _stream_chat_turn(client, router_url, model, session_id, transcript, max_tokens)
+        if turn_result.get("error") is not None:
+            results.append({"session_id": session_id, "turn": turn, "error": turn_result["error"]})
+            continue
+
+        elapsed_ms = turn_result["e2e_ms"]
+        results.append(
+            {
+                "session_id": session_id,
+                "turn": turn,
+                "latency_ms": elapsed_ms,
+                "status": turn_result["status"],
+                "replica": turn_result["replica"],
+                "cache_hit": turn_result["cache_hit"],
+                "sla_ms": sla_ms,
+                # A non-200 (e.g. a 503 admission rejection) is never a
+                # met SLA just because it came back fast -- SLA
+                # attainment means the request actually succeeded AND
+                # was fast enough, not merely "some response arrived".
+                "sla_violated": turn_result["status"] != 200 or elapsed_ms > sla_ms,
+                "ttft_ms": turn_result["ttft_ms"],
+                "tpot_ms": turn_result["tpot_ms"],
+                "predicted_cached_tokens": turn_result["predicted_cached_tokens"],
+                "prompt_tokens": turn_result["prompt_tokens"],
+                "completion_tokens": turn_result["completion_tokens"],
+                "cached_tokens": turn_result["cached_tokens"],
+            }
+        )
+        if turn_result["status"] == 200 and turn_result["content"]:
+            transcript.append({"role": "assistant", "content": turn_result["content"]})
+
+
+async def run_session_from_requests(
+    client: httpx.AsyncClient,
+    router_url: str,
+    model: str,
+    session_requests: SessionRequests,
+    results: list[dict],
+) -> None:
+    """Workload-driven session runner: sends session_requests.turns in
+    the message-append semantics documented in scripts/workloads.py (turn
+    0 is the full seed messages, turn>0 is a single new user message),
+    appending each turn's real streamed assistant reply before sending
+    the next turn -- never a scripted one -- so the bytes actually sent
+    to the router match what vLLM's own prefix cache would have stored."""
+    transcript: list[dict] = []
+    for turn_idx, turn_messages in enumerate(session_requests.turns):
+        transcript = list(turn_messages) if turn_idx == 0 else transcript + [turn_messages[0]]
+
+        turn_result = await _stream_chat_turn(
+            client, router_url, model, session_requests.session_id, transcript, session_requests.max_tokens
+        )
+        if turn_result.get("error") is not None:
+            results.append({"session_id": session_requests.session_id, "turn": turn_idx, "error": turn_result["error"]})
+            continue
+
+        results.append(
+            {
+                "session_id": session_requests.session_id,
+                "turn": turn_idx,
+                "ttft_ms": turn_result["ttft_ms"],
+                "tpot_ms": turn_result["tpot_ms"],
+                "e2e_ms": turn_result["e2e_ms"],
+                "status": turn_result["status"],
+                "replica": turn_result["replica"],
+                "cache_hit": turn_result["cache_hit"],
+                "predicted_cached_tokens": turn_result["predicted_cached_tokens"],
+                "prompt_tokens": turn_result["prompt_tokens"],
+                "completion_tokens": turn_result["completion_tokens"],
+                "cached_tokens": turn_result["cached_tokens"],
+                "ttft_slo_ms": session_requests.ttft_slo_ms,
+                "tpot_slo_ms": session_requests.tpot_slo_ms,
+            }
+        )
+        if turn_result["status"] == 200 and turn_result["content"]:
+            transcript.append({"role": "assistant", "content": turn_result["content"]})
 
 
 def bootstrap_ci(
@@ -200,57 +439,133 @@ def permutation_test_diff_means(
     return observed, p_value
 
 
-async def run_one_trial(
-    router_url: str, model: str, num_sessions: int, turns: int, concurrency: int,
-    sla_ms: float, max_tokens: int, seed: int,
-) -> dict:
-    random.seed(seed)
-    results: list[dict] = []
-    semaphore = asyncio.Semaphore(concurrency)
-
-    async def bounded_session(session_id: str):
-        async with semaphore, httpx.AsyncClient() as client:
-            await run_session(client, router_url, model, session_id, turns, sla_ms, max_tokens, results)
-
-    session_ids = [f"bench-{seed}-{uuid.uuid4().hex[:8]}" for _ in range(num_sessions)]
-    await asyncio.gather(*(bounded_session(sid) for sid in session_ids))
-
-    ok = [r for r in results if "latency_ms" in r]
+def _build_trial(seed: int, results: list[dict], sla_ms: float) -> dict:
+    """Aggregates one trial's raw per-request results (from run_session or
+    run_session_from_requests) into the per-trial summary dict
+    summarize_policy pools across trials. ``dual_slo_attainment``,
+    ``true_cache_ratio`` and ``prediction_error`` are None (not 0.0) when
+    this trial's results never carried the fields they need -- e.g. the
+    legacy canned-prompt path doesn't set ttft_slo_ms/tpot_slo_ms, so
+    there's no SLO here to report attainment against, and that's a
+    different fact than "0% attainment"."""
+    ok = [r for r in results if "e2e_ms" in r or "latency_ms" in r]
     if not ok:
-        return {"seed": seed, "ok": 0, "errors": len(results), "latencies": [], "cache_hit_rate": None, "sla_violation_rate": None}
+        return {
+            "seed": seed, "ok": 0, "errors": len(results), "latencies": [],
+            "cache_hit_rate": None, "sla_violation_rate": None,
+            "ttft_ms": [], "tpot_ms": [], "dual_slo_attainment": None,
+            "true_cache_ratio": None, "prediction_error": None, "replica_counts": {},
+        }
 
-    latencies = [r["latency_ms"] for r in ok]
+    latencies = [r.get("e2e_ms", r.get("latency_ms")) for r in ok]
+    cache_hits = [r for r in ok if r.get("cache_hit") == "true"]
+    sla_violations = [
+        r for r in ok if r.get("status") != 200 or r.get("e2e_ms", r.get("latency_ms", 0.0)) > sla_ms
+    ]
+    ttft_values = [r["ttft_ms"] for r in ok if r.get("ttft_ms") is not None]
+    tpot_values = [r["tpot_ms"] for r in ok if r.get("tpot_ms") is not None]
+
+    replica_counts: dict[str, int] = {}
+    for r in ok:
+        replica = r.get("replica")
+        if replica:
+            replica_counts[replica] = replica_counts.get(replica, 0) + 1
+
+    total_prompt_tokens = sum(r.get("prompt_tokens") or 0 for r in ok)
+    total_cached_tokens = sum(r.get("cached_tokens") or 0 for r in ok)
+    true_cache_ratio = (total_cached_tokens / total_prompt_tokens) if total_prompt_tokens > 0 else None
+
+    prediction_errors = [
+        abs((r.get("predicted_cached_tokens") or 0) - (r.get("cached_tokens") or 0)) / r["prompt_tokens"]
+        for r in ok if (r.get("prompt_tokens") or 0) > 0
+    ]
+    prediction_error = statistics.fmean(prediction_errors) if prediction_errors else None
+
+    has_dual_slo = any(r.get("ttft_slo_ms") is not None for r in results)
+    dual_slo_rate = dual_slo_attainment(results) if has_dual_slo else None
+
     return {
         "seed": seed,
         "ok": len(ok),
         "errors": len(results) - len(ok),
         "latencies": latencies,
-        "cache_hit_rate": sum(1 for r in ok if r.get("cache_hit") == "true") / len(ok),
-        "sla_violation_rate": sum(1 for r in ok if r["sla_violated"]) / len(ok),
+        "cache_hit_rate": len(cache_hits) / len(ok),
+        "sla_violation_rate": len(sla_violations) / len(ok),
+        "ttft_ms": ttft_values,
+        "tpot_ms": tpot_values,
+        "dual_slo_attainment": dual_slo_rate,
+        "true_cache_ratio": true_cache_ratio,
+        "prediction_error": prediction_error,
+        "replica_counts": replica_counts,
     }
 
 
-async def run_policy_trials(
-    router_url: str, policy_label: str, model: str, num_sessions: int, turns: int,
-    concurrency: int, sla_ms: float, max_tokens: int, seeds: list[int],
+async def _run_closed_loop_workload(
+    router_url: str, model: str, workload: Workload, concurrency: int,
 ) -> list[dict]:
-    trials = []
-    for seed in seeds:
-        trial = await run_one_trial(router_url, model, num_sessions, turns, concurrency, sla_ms, max_tokens, seed)
-        if trial["latencies"]:
-            print(
-                f"  [{policy_label}] seed={seed}: {trial['ok']} ok, {trial['errors']} errors, "
-                f"mean={statistics.fmean(trial['latencies']):.1f}ms, cache_hit={trial['cache_hit_rate']:.1%}"
+    """Closed-loop: every session in workload.sessions is one concurrent
+    worker, bounded by ``concurrency`` -- the direct workload-driven
+    replacement for the old PROMPTS-based run_one_trial/run_policy_trials
+    (which are no longer needed now that every --workload choice,
+    including the default "tiny", goes through this same path)."""
+    results: list[dict] = []
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def bounded_session(session_requests: SessionRequests) -> None:
+        async with semaphore, httpx.AsyncClient() as client:
+            await run_session_from_requests(client, router_url, model, session_requests, results)
+
+    await asyncio.gather(*(bounded_session(sr) for sr in workload.sessions))
+    return results
+
+
+async def run_open_loop_workload_window(
+    router_url: str, model: str, workload: Workload, target_rps: float, seed: int, max_drain_s: float = 60.0,
+) -> list[dict]:
+    """Open-loop counterpart to _run_closed_loop_workload for `benchmark.py
+    run --rate`: every session in workload.sessions arrives exactly once,
+    Poisson-spaced at target_rps (poisson_arrivals) rather than at a fixed
+    concurrency -- one workload IS one arrival window here, distinct from
+    run_open_loop_arrivals's goodput-sweep use below, which spawns new
+    sessions continuously for a fixed duration instead of a fixed count."""
+    if target_rps <= 0:
+        raise ValueError("target_rps must be > 0")
+    results: list[dict] = []
+    arrivals = poisson_arrivals(target_rps, len(workload.sessions), seed)
+    limits = httpx.Limits(max_connections=max(50, int(target_rps * 4)), max_keepalive_connections=50)
+    async with httpx.AsyncClient(limits=limits) as client:
+        start = time.monotonic()
+        tasks: list[asyncio.Task] = []
+        for session_requests, arrival_t in zip(workload.sessions, arrivals, strict=True):
+            wait_s = arrival_t - (time.monotonic() - start)
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+            tasks.append(
+                asyncio.create_task(run_session_from_requests(client, router_url, model, session_requests, results))
             )
-        else:
-            print(f"  [{policy_label}] seed={seed}: no successful requests ({trial['errors']} errors)")
-        trials.append(trial)
-    return trials
+        if tasks:
+            _done, pending = await asyncio.wait(tasks, timeout=max_drain_s)
+            for t in pending:
+                t.cancel()
+    return results
+
+
+def _print_trial_line(policy_label: str, trial: dict) -> None:
+    if not trial["latencies"]:
+        print(f"  [{policy_label}] seed={trial['seed']}: no successful requests ({trial['errors']} errors)")
+        return
+    extra = ""
+    if trial.get("dual_slo_attainment") is not None:
+        extra = f", goodput={trial['dual_slo_attainment']:.1%}"
+    print(
+        f"  [{policy_label}] seed={trial['seed']}: {trial['ok']} ok, {trial['errors']} errors, "
+        f"mean={statistics.fmean(trial['latencies']):.1f}ms, cache_hit={trial['cache_hit_rate']:.1%}{extra}"
+    )
 
 
 # -- Goodput: open-loop load sweep (DistServe-style) -------------------------
 #
-# run_one_trial/run_policy_trials above are *closed-loop*: a fixed number of
+# _run_closed_loop_workload above is *closed-loop*: a fixed number of
 # concurrent session workers, each starting its next turn only once the
 # previous one returns. Under overload, that quietly self-throttles the
 # offered rate to match whatever the system can keep up with -- exactly
@@ -265,15 +580,24 @@ async def run_policy_trials(
 async def run_open_loop_arrivals(
     router_url: str, model: str, target_rps: float, duration_s: float,
     turns: int, sla_ms: float, max_tokens: int, seed: int,
-    max_drain_s: float = 60.0,
+    max_drain_s: float = 60.0, workload: Workload | None = None,
 ) -> list[dict]:
     """New sessions arrive as a Poisson process at target_rps for
-    duration_s seconds (each running `turns` sequential turns, same
-    run_session as the closed-loop path), then waits up to max_drain_s for
-    whatever's still in flight before giving up on stragglers. One shared,
-    connection-pooled client: at realistic RPS many sessions overlap, and
-    a fresh TCP/TLS handshake per session (as the closed-loop trials use)
-    would itself skew the very latencies this is trying to measure."""
+    duration_s seconds, then waits up to max_drain_s for whatever's still
+    in flight before giving up on stragglers. One shared, connection-
+    pooled client: at realistic RPS many sessions overlap, and a fresh
+    TCP/TLS handshake per session would itself skew the very latencies
+    this is trying to measure.
+
+    With ``workload=None`` (the default -- unchanged behavior), each
+    arrival runs the legacy canned-prompt run_session with its own fresh
+    session id. With a workload given, each arrival instead cycles through
+    workload.sessions (via run_session_from_requests, in order, wrapping
+    around) so a goodput sweep over shared_system/long_doc/sharegpt
+    actually exercises those workloads' shared-prefix structure -- each
+    cycle through the list gets a distinct session id suffix so repeated
+    passes over the same finite list don't collide on cache-affinity
+    state keyed by session id."""
     if target_rps <= 0:
         raise ValueError("target_rps must be > 0")
     rng = random.Random(seed)
@@ -285,12 +609,21 @@ async def run_open_loop_arrivals(
         session_count = 0
         while time.monotonic() < deadline:
             session_count += 1
-            session_id = f"goodput-{seed}-{session_count}"
-            tasks.append(
-                asyncio.create_task(
-                    run_session(client, router_url, model, session_id, turns, sla_ms, max_tokens, results)
+            if workload is not None and workload.sessions:
+                base = workload.sessions[(session_count - 1) % len(workload.sessions)]
+                session_requests = replace(base, session_id=f"{base.session_id}-arrival{session_count}")
+                tasks.append(
+                    asyncio.create_task(
+                        run_session_from_requests(client, router_url, model, session_requests, results)
+                    )
                 )
-            )
+            else:
+                session_id = f"goodput-{seed}-{session_count}"
+                tasks.append(
+                    asyncio.create_task(
+                        run_session(client, router_url, model, session_id, turns, sla_ms, max_tokens, results)
+                    )
+                )
             await asyncio.sleep(rng.expovariate(target_rps))
         if tasks:
             _done, pending = await asyncio.wait(tasks, timeout=max_drain_s)
@@ -302,6 +635,7 @@ async def run_open_loop_arrivals(
 async def run_goodput_sweep(
     router_url: str, policy_label: str, model: str, rps_levels: list[float],
     duration_s: float, turns: int, sla_ms: float, max_tokens: int, seed: int,
+    workload: Workload | None = None,
 ) -> dict:
     """Runs run_open_loop_arrivals once per RPS in rps_levels (in the
     order given -- ascending is the natural choice but not enforced) and
@@ -311,10 +645,12 @@ async def run_goodput_sweep(
     against a different --sla-target without re-running live traffic."""
     levels = []
     for rps in rps_levels:
-        results = await run_open_loop_arrivals(router_url, model, rps, duration_s, turns, sla_ms, max_tokens, seed)
+        results = await run_open_loop_arrivals(
+            router_url, model, rps, duration_s, turns, sla_ms, max_tokens, seed, workload=workload
+        )
         attainment = sla_attainment(results, sla_ms)
-        ok = [r for r in results if "latency_ms" in r]
-        latencies = sorted(r["latency_ms"] for r in ok)
+        ok = [r for r in results if "latency_ms" in r or "e2e_ms" in r]
+        latencies = sorted(r.get("latency_ms", r.get("e2e_ms")) for r in ok)
         mean_ms = statistics.fmean(latencies) if latencies else None
         p95_ms = percentile(latencies, 95) if len(latencies) >= 2 else None
         print(
@@ -397,12 +733,37 @@ def summarize_policy(policy_label: str, trials: list[dict]) -> dict:
     cache_hit_rates = [t["cache_hit_rate"] for t in trials if t["latencies"]]
     sla_violation_rates = [t["sla_violation_rate"] for t in trials if t["latencies"]]
 
+    # New (additive) fields below all use .get(...) with an empty/None
+    # fallback: trials built by _build_trial always carry these keys, but
+    # a hand-built trial dict from an older report or a test (see
+    # tests/test_benchmark_stats.py) may not, and summarize_policy must
+    # keep working over those exactly as before rather than KeyError.
+    all_ttft = [v for t in trials for v in t.get("ttft_ms", [])]
+    all_tpot = [v for t in trials for v in t.get("tpot_ms", [])]
+    per_trial_ttft_means = [statistics.fmean(t["ttft_ms"]) for t in trials if t.get("ttft_ms")]
+    dual_slo_rates = [t["dual_slo_attainment"] for t in trials if t.get("dual_slo_attainment") is not None]
+    true_cache_ratios = [t["true_cache_ratio"] for t in trials if t.get("true_cache_ratio") is not None]
+    prediction_errors = [t["prediction_error"] for t in trials if t.get("prediction_error") is not None]
+
+    pooled_replica_counts: dict[str, int] = {}
+    for t in trials:
+        for replica, count in t.get("replica_counts", {}).items():
+            pooled_replica_counts[replica] = pooled_replica_counts.get(replica, 0) + count
+    load_imbalance = None
+    if pooled_replica_counts:
+        counts = list(pooled_replica_counts.values())
+        mean_count = statistics.fmean(counts)
+        load_imbalance = (max(counts) / mean_count) if mean_count > 0 else None
+
     def ci_or_nan(values):
         return bootstrap_ci(values) if values else (float("nan"), float("nan"), float("nan"))
 
     mean_point, mean_lo, mean_hi = ci_or_nan(per_trial_means)
     cache_point, cache_lo, cache_hi = ci_or_nan(cache_hit_rates)
     sla_point, sla_lo, sla_hi = ci_or_nan(sla_violation_rates)
+    goodput_point, goodput_lo, goodput_hi = ci_or_nan(dual_slo_rates)
+    true_cache_point, true_cache_lo, true_cache_hi = ci_or_nan(true_cache_ratios)
+    pred_err_point, pred_err_lo, pred_err_hi = ci_or_nan(prediction_errors)
 
     return {
         "policy": policy_label,
@@ -415,9 +776,17 @@ def summarize_policy(policy_label: str, trials: list[dict]) -> dict:
         # int dict keys on the way out -- using strings from the start keeps
         # a freshly-computed report and one reloaded from disk identical.
         "latency_percentiles_ms": {f"p{p}": summarize_percentile(all_latencies, p) for p in (50, 90, 95, 99)},
+        "ttft_percentiles_ms": {f"p{p}": summarize_percentile(all_ttft, p) for p in (50, 90, 99)},
+        "tpot_percentiles_ms": {f"p{p}": summarize_percentile(all_tpot, p) for p in (50, 99)},
         "cache_hit_rate": {"point": cache_point, "ci95_low": cache_lo, "ci95_high": cache_hi},
         "sla_violation_rate": {"point": sla_point, "ci95_low": sla_lo, "ci95_high": sla_hi},
+        "goodput_rate": {"point": goodput_point, "ci95_low": goodput_lo, "ci95_high": goodput_hi},
+        "true_cache_ratio": {"point": true_cache_point, "ci95_low": true_cache_lo, "ci95_high": true_cache_hi},
+        "prediction_error": {"point": pred_err_point, "ci95_low": pred_err_lo, "ci95_high": pred_err_hi},
+        "load_imbalance": load_imbalance,
         "per_trial_means_ms": per_trial_means,
+        "per_trial_ttft_means_ms": per_trial_ttft_means,
+        "per_trial_goodput_rates": dual_slo_rates,
         "all_latencies_ms": all_latencies,
     }
 
@@ -427,6 +796,29 @@ def _fmt_percentile_cell(pct: dict) -> str:
         return "n/a"
     flag = "" if pct["reliable"] else "*"
     return f"{pct['point']:.0f}{flag}"
+
+
+def _fmt_ci_metric(metric: dict, fmt: str = "{:.1%}") -> str:
+    if metric["point"] != metric["point"]:  # NaN check without importing math again here
+        return "n/a"
+    return fmt.format(metric["point"])
+
+
+def _print_pairwise_permutation(reports: list[dict], key: str, label: str) -> None:
+    """Shared pairwise permutation-test printer, generalized from what was
+    originally a single copy-pasted block for e2e latency only -- used for
+    e2e latency, TTFT, and goodput/dual-SLO attainment rate alike."""
+    print(f"\nPairwise significance ({label}, permutation test, two-sided, alpha=0.05):")
+    for i in range(len(reports)):
+        for j in range(i + 1, len(reports)):
+            a, b = reports[i], reports[j]
+            va, vb = a.get(key, []), b.get(key, [])
+            if len(va) < 2 or len(vb) < 2:
+                print(f"  {a['policy']} vs {b['policy']}: need >=2 trials each with this metric, skipping")
+                continue
+            diff, p = permutation_test_diff_means(va, vb)
+            verdict = "significant" if p < 0.05 else "NOT significant"
+            print(f"  {a['policy']} vs {b['policy']}: diff={diff:+.4f}, p={p:.4f} -> {verdict}")
 
 
 def print_comparison_table(reports: list[dict]) -> None:
@@ -453,33 +845,70 @@ def print_comparison_table(reports: list[dict]) -> None:
             "run more trials/sessions, or trust the mean's 95% CI instead)"
         )
 
-    print("\nPairwise significance (permutation test on per-trial mean latency, two-sided, alpha=0.05):")
-    for i in range(len(reports)):
-        for j in range(i + 1, len(reports)):
-            a, b = reports[i], reports[j]
-            if len(a["per_trial_means_ms"]) < 2 or len(b["per_trial_means_ms"]) < 2:
-                print(f"  {a['policy']} vs {b['policy']}: need >=2 trials each for a significance test, skipping")
-                continue
-            diff, p = permutation_test_diff_means(a["per_trial_means_ms"], b["per_trial_means_ms"])
-            verdict = "significant" if p < 0.05 else "NOT significant"
-            print(f"  {a['policy']} vs {b['policy']}: diff={diff:+.1f}ms, p={p:.4f} -> {verdict}")
+    # Prefix-aware routing metrics -- only meaningful for workloads with
+    # real shared-prefix structure (--workload shared_system/long_doc),
+    # but always printed (as n/a where absent) since a report's JSON
+    # always carries these keys once produced by this version.
+    if any(r.get("ttft_percentiles_ms", {}).get("p50", {}).get("point") is not None for r in reports):
+        print(f"\n{'policy':<18}{'ttft_p50':>10}{'ttft_p90':>10}{'ttft_p99':>10}{'tpot_p50':>10}{'tpot_p99':>10}"
+              f"{'goodput':>10}{'true_cache':>12}{'pred_err':>10}{'load_imb':>10}")
+        for r in reports:
+            ttft = r.get("ttft_percentiles_ms", {})
+            tpot = r.get("tpot_percentiles_ms", {})
+            goodput = r.get("goodput_rate", {"point": float("nan")})
+            true_cache = r.get("true_cache_ratio", {"point": float("nan")})
+            pred_err = r.get("prediction_error", {"point": float("nan")})
+            load_imb = r.get("load_imbalance")
+            load_imb_str = f"{load_imb:.2f}" if load_imb is not None else "n/a"
+            print(
+                f"{r['policy']:<18}"
+                f"{_fmt_percentile_cell(ttft.get('p50', {'point': None, 'reliable': True})):>10}"
+                f"{_fmt_percentile_cell(ttft.get('p90', {'point': None, 'reliable': True})):>10}"
+                f"{_fmt_percentile_cell(ttft.get('p99', {'point': None, 'reliable': True})):>10}"
+                f"{_fmt_percentile_cell(tpot.get('p50', {'point': None, 'reliable': True})):>10}"
+                f"{_fmt_percentile_cell(tpot.get('p99', {'point': None, 'reliable': True})):>10}"
+                f"{_fmt_ci_metric(goodput):>10}"
+                f"{_fmt_ci_metric(true_cache):>12}"
+                f"{_fmt_ci_metric(pred_err):>10}"
+                f"{load_imb_str:>10}"
+            )
+
+    _print_pairwise_permutation(reports, "per_trial_means_ms", "mean e2e latency (ms)")
+    _print_pairwise_permutation(reports, "per_trial_ttft_means_ms", "mean TTFT (ms)")
+    _print_pairwise_permutation(reports, "per_trial_goodput_rates", "goodput / dual-SLO attainment rate")
 
 
 def _cmd_run(args: argparse.Namespace) -> None:
     seeds = [int(s) for s in args.seeds.split(",")]
-    trials = asyncio.run(
-        run_policy_trials(
-            router_url=args.router_url.rstrip("/"),
-            policy_label=args.policy_label,
-            model=args.model,
-            num_sessions=args.num_sessions,
-            turns=args.turns,
-            concurrency=args.concurrency,
-            sla_ms=args.sla_ms,
-            max_tokens=args.max_tokens,
-            seeds=seeds,
-        )
+    base_workload_args = WorkloadArgs(
+        workload=args.workload,
+        num_apps=args.workload_num_apps,
+        zipf_s=args.workload_zipf_s,
+        system_prompt_tokens=args.workload_system_prompt_tokens,
+        num_docs=args.workload_num_docs,
+        doc_tokens=args.workload_doc_tokens,
+        questions_per_doc=args.workload_questions_per_doc,
+        sharegpt_path=args.workload_sharegpt_path,
+        sessions=args.num_sessions,
+        turns=args.turns,
+        max_tokens=args.max_tokens,
+        ttft_slo_ms=args.ttft_slo_ms,
+        tpot_slo_ms=args.tpot_slo_ms,
+        sla_ms=args.sla_ms,
     )
+
+    router_url = args.router_url.rstrip("/")
+    trials = []
+    for seed in seeds:
+        workload = build_workload(replace(base_workload_args, seed=seed))
+        if args.rate:
+            results = asyncio.run(run_open_loop_workload_window(router_url, args.model, workload, args.rate, seed))
+        else:
+            results = asyncio.run(_run_closed_loop_workload(router_url, args.model, workload, args.concurrency))
+        trial = _build_trial(seed, results, args.sla_ms)
+        _print_trial_line(args.policy_label, trial)
+        trials.append(trial)
+
     report = summarize_policy(args.policy_label, trials)
     print()
     print_comparison_table([report])
@@ -500,6 +929,26 @@ def _cmd_goodput(args: argparse.Namespace) -> None:
     rps_levels = [float(x) for x in args.rps_levels.split(",")]
     if any(rps <= 0 for rps in rps_levels):
         raise SystemExit("--rps-levels must all be positive")
+
+    workload = None
+    if args.workload != "tiny":
+        workload = build_workload(
+            WorkloadArgs(
+                workload=args.workload,
+                num_apps=args.workload_num_apps,
+                zipf_s=args.workload_zipf_s,
+                system_prompt_tokens=args.workload_system_prompt_tokens,
+                num_docs=args.workload_num_docs,
+                doc_tokens=args.workload_doc_tokens,
+                questions_per_doc=args.workload_questions_per_doc,
+                sharegpt_path=args.workload_sharegpt_path,
+                turns=args.turns,
+                seed=args.seed,
+                max_tokens=args.max_tokens,
+                sla_ms=args.sla_ms,
+            )
+        )
+
     report = asyncio.run(
         run_goodput_sweep(
             router_url=args.router_url.rstrip("/"),
@@ -511,6 +960,7 @@ def _cmd_goodput(args: argparse.Namespace) -> None:
             sla_ms=args.sla_ms,
             max_tokens=args.max_tokens,
             seed=args.seed,
+            workload=workload,
         )
     )
     report.update(find_goodput(report["levels"], args.sla_target))
@@ -528,6 +978,20 @@ def _cmd_goodput_compare(args: argparse.Namespace) -> None:
     print_goodput_comparison(reports)
 
 
+def _add_workload_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--workload", choices=["shared_system", "long_doc", "sharegpt", "tiny"], default="tiny",
+        help="workload shape to generate (default 'tiny' = original 5-canned-prompt behavior, unchanged)",
+    )
+    parser.add_argument("--workload-num-apps", type=int, default=6, help="shared_system: number of distinct system prompts")
+    parser.add_argument("--workload-zipf-s", type=float, default=1.1, help="shared_system: Zipf skew exponent for app assignment")
+    parser.add_argument("--workload-system-prompt-tokens", type=int, default=2000, help="shared_system: tokens per system prompt")
+    parser.add_argument("--workload-num-docs", type=int, default=5, help="long_doc: number of distinct documents")
+    parser.add_argument("--workload-doc-tokens", type=int, default=3000, help="long_doc: tokens per document")
+    parser.add_argument("--workload-questions-per-doc", type=int, default=6, help="long_doc: questions asked per document")
+    parser.add_argument("--workload-sharegpt-path", default="", help="sharegpt: path to a local ShareGPT-format JSON trace file")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -540,8 +1004,15 @@ def main() -> None:
     run_parser.add_argument("--turns", type=int, default=4)
     run_parser.add_argument("--concurrency", type=int, default=6)
     run_parser.add_argument("--sla-ms", type=float, default=3000.0)
+    run_parser.add_argument("--ttft-slo-ms", type=float, default=500.0, help="per-request TTFT SLO for goodput_rate")
+    run_parser.add_argument("--tpot-slo-ms", type=float, default=50.0, help="per-request TPOT SLO for goodput_rate")
     run_parser.add_argument("--max-tokens", type=int, default=128)
     run_parser.add_argument("--seeds", default="1,2,3,4,5", help="comma-separated seeds, one independent trial each")
+    run_parser.add_argument(
+        "--rate", type=float, default=None,
+        help="if given, each seed is one open-loop Poisson-arrival window at this target RPS instead of closed-loop",
+    )
+    _add_workload_args(run_parser)
     run_parser.add_argument("--output", required=True, help="path to write the JSON report to")
     run_parser.set_defaults(func=_cmd_run)
 
@@ -569,6 +1040,7 @@ def main() -> None:
     )
     goodput_parser.add_argument("--max-tokens", type=int, default=128)
     goodput_parser.add_argument("--seed", type=int, default=1)
+    _add_workload_args(goodput_parser)
     goodput_parser.add_argument("--output", required=True, help="path to write the JSON report to")
     goodput_parser.set_defaults(func=_cmd_goodput)
 

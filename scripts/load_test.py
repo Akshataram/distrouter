@@ -9,116 +9,46 @@ header, when present), and per-replica distribution.
 Usage:
     python scripts/load_test.py --router-url http://localhost:8000 \\
         --num-sessions 50 --turns 4 --concurrency 10
+
+Thin wrapper: the actual session-running and workload-generation logic now
+lives in scripts/workloads.py (deterministic workload generators) and
+scripts/benchmark.py (_stream_chat_turn / run_session -- streaming SSE,
+same as `benchmark.py run`), so this script and benchmark.py no longer
+carry two copies of the same PROMPTS list and turn-runner. This stays the
+simple, single-shot tool; scripts/benchmark.py is the statistically-
+rigorous one (bootstrap CIs, permutation tests, multiple workload shapes).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import math
-import random
 import statistics
+import sys
 import time
 import uuid
+from pathlib import Path
 
 import httpx
 
-# A percentile estimate is only as good as how many samples actually land
-# in its tail: p99 asks "what's typical of the worst 1%", which is
-# unanswerable from a few dozen requests -- you'd just be reading off the
-# single largest observation and calling it a percentile. Requiring at
-# least ~10 samples past the tail (min 20 overall) is a standard rule of
-# thumb for a percentile to reflect real distribution shape rather than
-# noise from the top 1-2 points.
-_MIN_TAIL_SAMPLES = 10
+# Running this file directly (`python scripts/load_test.py`, as documented
+# above) only puts scripts/ itself on sys.path, not the repo root -- so
+# `from scripts.benchmark import ...` below would otherwise only work
+# under pytest (which already puts the repo root on sys.path). Inserting
+# the repo root explicitly makes both invocations work the same way.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts.benchmark import (  # noqa: E402
+    format_percentile,
+    run_session,
+)
 
 
-def percentile(sorted_values: list[float], p: float) -> float:
-    """Linear-interpolation percentile (numpy's default 'linear' method),
-    0 <= p <= 100, over an already-sorted list."""
-    if not sorted_values:
-        raise ValueError("percentile of empty data")
-    if len(sorted_values) == 1:
-        return sorted_values[0]
-    rank = (p / 100) * (len(sorted_values) - 1)
-    lo = int(rank)
-    hi = min(lo + 1, len(sorted_values) - 1)
-    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (rank - lo)
-
-
-def min_samples_for_percentile(p: float) -> int:
-    tail_fraction = (100 - p) / 100
-    return max(20, math.ceil(_MIN_TAIL_SAMPLES / tail_fraction))
-
-
-def format_percentile(sorted_values: list[float], p: float) -> str:
-    value = percentile(sorted_values, p)
-    min_n = min_samples_for_percentile(p)
-    n = len(sorted_values)
-    if n < min_n:
-        return f"{value:.1f}ms (unreliable: n={n}, want >={min_n})"
-    return f"{value:.1f}ms"
-
-
-PROMPTS = [
-    "Summarize the plot of a story about a lighthouse keeper.",
-    "What are three ways to improve a Python function's performance?",
-    "Explain the difference between TCP and UDP in one paragraph.",
-    "Give me a recipe idea using chickpeas and spinach.",
-    "Write a short haiku about autumn rain.",
-]
-
-
-async def run_session(
-    client: httpx.AsyncClient,
-    router_url: str,
-    model: str,
-    session_id: str,
-    num_turns: int,
-    sla_ms: float,
-    max_tokens: int,
-    results: list[dict],
-):
-    messages = []
-    for turn in range(num_turns):
-        messages.append({"role": "user", "content": random.choice(PROMPTS)})
-        start = time.monotonic()
-        try:
-            resp = await client.post(
-                f"{router_url}/v1/chat/completions",
-                json={"model": model, "messages": messages, "max_tokens": max_tokens},
-                headers={"X-Session-Id": session_id, "X-SLA-Ms": str(sla_ms)},
-                timeout=120.0,
-            )
-            elapsed_ms = (time.monotonic() - start) * 1000.0
-            results.append(
-                {
-                    "session_id": session_id,
-                    "turn": turn,
-                    "latency_ms": elapsed_ms,
-                    "status": resp.status_code,
-                    "replica": resp.headers.get("x-swiftserve-replica"),
-                    "cache_hit": resp.headers.get("x-swiftserve-cache-hit"),
-                    "sla_ms": sla_ms,
-                    # A non-200 (e.g. a 503 admission rejection) is never a
-                    # met SLA just because it came back fast -- SLA
-                    # attainment means the request actually succeeded AND
-                    # was fast enough, not merely "some response arrived".
-                    "sla_violated": resp.status_code != 200 or elapsed_ms > sla_ms,
-                }
-            )
-            if resp.status_code == 200:
-                reply = resp.json()["choices"][0]["message"]["content"]
-                messages.append({"role": "assistant", "content": reply})
-        except httpx.HTTPError as exc:
-            results.append({"session_id": session_id, "turn": turn, "error": str(exc)})
-
-
-async def main_async(args):
+async def main_async(args: argparse.Namespace) -> None:
     results: list[dict] = []
     semaphore = asyncio.Semaphore(args.concurrency)
 
-    async def bounded_session(session_id: str):
+    async def bounded_session(session_id: str) -> None:
         async with semaphore, httpx.AsyncClient() as client:
             await run_session(
                 client, args.router_url, args.model, session_id,
@@ -158,7 +88,7 @@ async def main_async(args):
     )
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--router-url", default="http://localhost:8000")
     parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")

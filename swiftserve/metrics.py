@@ -98,6 +98,15 @@ REPLICA_BATCH_CAPACITY = Gauge(
     registry=REGISTRY,
 )
 
+REPLICA_TRUE_PREFIX_HIT_RATE = Gauge(
+    "swiftserve_replica_true_prefix_hit_rate",
+    "vLLM's own reported prefix-cache hit rate per replica (vllm:prefix_cache_hits "
+    "/ vllm:prefix_cache_queries), the ground truth SwiftServe's own cache-hit "
+    "prediction can be checked against.",
+    ["replica_id"],
+    registry=REGISTRY,
+)
+
 _CIRCUIT_STATE_VALUE = {"closed": 0, "half_open": 1, "open": 2}
 
 
@@ -130,6 +139,13 @@ def refresh_replica_gauges(replicas: Iterable) -> None:
         REPLICA_EWMA_LATENCY_MS.labels(replica_id=rid).set(r.ewma_latency_ms)
         REPLICA_CIRCUIT_STATE.labels(replica_id=rid).set(_CIRCUIT_STATE_VALUE[r.circuit.state.value])
         REPLICA_BATCH_CAPACITY.labels(replica_id=rid).set(r.effective_batch_capacity())
+        # Skip setting (not set-to-0) when there's no query volume yet:
+        # 0 would misreport "cache never hits" when the real answer is
+        # "no data yet", and a Prometheus gauge simply not being set for a
+        # scrape is the honest way to represent that.
+        true_hit_rate = r.true_prefix_hit_rate
+        if true_hit_rate is not None:
+            REPLICA_TRUE_PREFIX_HIT_RATE.labels(replica_id=rid).set(true_hit_rate)
 
 
 def render_latest() -> bytes:

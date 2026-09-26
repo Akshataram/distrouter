@@ -181,14 +181,51 @@ multi-node cluster -- separate physical GPUs, separate processes, real
 network latency between the router and each node, rather than 3 slices of
 one shared GPU.
 
+On a free T4 (~16GB), the notebook launches `Qwen/Qwen2.5-3B-Instruct`
+(rather than the 7B default `run_replicas.sh` uses on a real multi-GPU box)
+so prefill is still a real, measurable cost rather than the entire request
+being generation time -- see problem P1 in `ARCHITECTURE.md`'s Phase 0
+section for why that matters for anything claiming to measure cache-aware
+routing. Its vLLM launch flags:
+
+```
+--enable-prefix-caching --enable-prompt-tokens-details --block-size 16 \
+--max-num-seqs 32 --max-model-len 8192 --dtype half
+```
+
+`--enable-prompt-tokens-details` is the one that actually makes
+`scripts/benchmark.py`'s `true_cache_ratio` real instead of always zero --
+without it, vLLM never reports `usage.prompt_tokens_details.cached_tokens`
+in its response at all. The rest are T4-appropriate defaults: `--dtype half`
+(T4 doesn't have fast bf16), `--block-size 16` / `--max-num-seqs 32` sized
+for ~16GB of VRAM, `--max-model-len 8192` enough headroom for the
+`shared_system`/`long_doc` workloads' longer prompts (see
+`scripts/workloads.py`) without running out of KV-cache blocks.
+
 Each run of the notebook prints a public URL and an admin token. Point the
 router at the URLs (from wherever you're running it -- a laptop is fine,
 the router is CPU-only):
 
 ```bash
 export SWIFTSERVE_REPLICAS=https://node-a.trycloudflare.com,https://node-b.trycloudflare.com
+export SWIFTSERVE_MODEL=Qwen/Qwen2.5-3B-Instruct
 uvicorn swiftserve.app:app --port 8000
 ```
+
+To actually see a difference between policies, benchmark against a workload
+with real shared-prefix structure instead of the default `tiny` one (see
+problem P1 above -- 5 short canned prompts give a cache-aware policy
+nothing to exploit):
+
+```bash
+python scripts/benchmark.py run --router-url http://localhost:8000 \
+  --policy-label swiftserve --workload shared_system --workload-num-apps 6 \
+  --seeds 1,2,3,4,5 --output reports/swiftserve_shared.json
+```
+
+The comparison table's second block (`ttft_p50`/`true_cache`/etc.) is only
+populated by workloads with real shared prefixes -- `tiny` will show it as
+`n/a`, which is the honest answer, not a bug.
 
 ## 7. Observability: Prometheus + Grafana
 
