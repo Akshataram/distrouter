@@ -623,7 +623,123 @@ Keep these; drop the ones reframed in §2.
 
 ---
 
-## 11. References
+## 11. The ledger: every paper → exactly what you take → where it lands
+
+Three tiers, marked honestly:
+
+- **[CODE]** — becomes a real mechanism in the repo.
+- **[FRAME]** — shapes how you justify/argue/evaluate; no code, but changes the paper.
+- **[CITE]** — one sentence of related work, for breadth and to show you know the space.
+
+### A. LLM serving / prefix routing (the field you're in)
+
+| Paper | Its idea | **What you take** | Where | Tier |
+|---|---|---|---|---|
+| vLLM / PagedAttention (SOSP'23) | Block-paged KV; prefix caching reuses whole blocks via chained hash | Your index must be **blocks of tokens**, `block_size=16` matching the launch flag — not characters | `prefix_index.py`, Phase D | CODE |
+| SGLang / RadixAttention (NeurIPS'24) | Radix tree per worker + `cache_threshold`, `balance_abs/rel` | The **`cache_threshold` rule** (route on match only if match_ratio ≥ 0.5) as your `prefix_affinity` ablation; the two imbalance thresholds | `policy.py`, Phase D/E | CODE |
+| **Preble** (ICLR'25) | E2 exploit/explore; hot-prefix replication; Zipf shared-prompt workloads | (i) The **workload shape** — already built; (ii) the finding *gains only appear with long shared prompts* — this is why Phase 0 existed at all; (iii) hot-prefix replication, but you **replace their heuristic with ski-rental** | `scripts/workloads.py` ✅ done; §5.2 | CODE |
+| **Mooncake** (FAST'25) | TTFT = queue time + prefill of uncached part; early rejection | The **TTFT decomposition equation itself**, as your cost-model skeleton | §5.1, Phase E | CODE |
+| **DistServe** (OSDI'24) | Goodput = requests meeting **both** TTFT and TPOT SLOs | Goodput as the headline metric — **already shipped** as `dual_slo_attainment()` | `benchmark.py` ✅ done | CODE |
+| Dynamo KV Router | `cost = w·prefill_blocks + decode_blocks` | The tunable **`overlap_weight` w** in the cost function | §5.1 `W_OVERLAP` | CODE |
+| llm-d precise routing | Exact KV events; recompute hashes from `token_ids`, never copy engine hashes | The **principle** (compute your own hashes — survives vLLM version changes). You keep this even with Bloom digests. **Reject** the ZMQ transport | Phase D/G | CODE + reject |
+| **CacheRoute** (2026) | Periodic routing plan; stable warm set | Your **primary competitor**. Their stated failure mode (residual load skew) motivates you; match their metric set (served KV hit rate, QPS @ p99 SLO) so numbers are comparable | §3.1, evaluation | FRAME |
+| PEEK (2026) | Prefix trie over the pending queue, co-optimized with eviction | The observation that routing and eviction *should* share one signal — and that you **can't**, being engine-unmodified. State it as a limit | §9 | FRAME |
+| Sarathi-Serve (OSDI'24) | Chunked prefill; long prefills degrade others' decode | The **justification for a TPOT term** in the cost model | §5.1 rationale | FRAME |
+| Orca (OSDI'22) | Iteration-level (continuous) batching | Why your M/M/c model is the right shape — already used | `state.py` ✅ done | CITE |
+
+### B. Load balancing under stale information — *biggest code impact*
+
+| Paper | Its idea | **What you take** | Where | Tier |
+|---|---|---|---|---|
+| **C3** (NSDI'15) | $W=\frac{1}{\bar L}(q+1)^3$ where $q$ includes the client's own outstanding requests; cubic over-penalty damps herding | The **exact scoring formula shape** — this is your cost model's real parent | §5.1, Phase E | CODE |
+| Tars (2017) | C3's residual weakness is feedback *timeliness* | Justification for the **age-discount** `trust = exp(-age/TAU)` | §5.1 | CODE |
+| Mitzenmacher, Power of Two Choices (TPDS'01) | With cached/stale load, d-choices **herds** | The **diagnosis** that your `min(queue_depth)` over 2s-stale data is a textbook herding config | motivates §5.1 | FRAME |
+| **Join-Idle-Queue** (2011) | Servers announce idleness; **zero** request-path communication | The **entire late-binding mechanism**, replacing Sparrow | Phase I, sidecar push | CODE |
+| Sparrow (SOSP'13) | Batch sampling + late binding | Canonical citation — and you explain **why you rejected it** (2 RTTs at 100ms). Showing judgment is worth as much as the mechanism | §5.7 | FRAME |
+| **Tail at Scale** (CACM'13) | Hedged requests (fire duplicate after p95, ~5% extra load); tied requests cancel on start | The hedging mechanism, trigger rule, and budget — **plus your novel twist**: under prefix caching the hedge *is* the replication | §5.6, Phase F | CODE |
+| Taiji (SOSP'19) | Connection-aware routing for backend cache locality (−17% load); stable segment assignment | Production precedent that locality-vs-balance is a real operational tradeoff; "move assignments in coarse chunks" informs re-placement on churn | §3.7, Phase B | FRAME |
+
+### C. Distributed caching
+
+| Paper | Its idea | **What you take** | Where | Tier |
+|---|---|---|---|---|
+| **Summary Cache** (SIGCOMM'98) | Wide-area proxies exchange **Bloom filters** of cache contents; 25–60× fewer messages | **Your entire cache-state mechanism**, replacing llm-d event streams | Phase G | CODE |
+| Broder & Mitzenmacher, Bloom survey | Counting Bloom filters (support deletion); false-positive math | Counting BF in the sidecar; the ε formula to size bits/element **and to report bounded error** | Phase G | CODE |
+| False-Negative Awareness (2021) | Stale indicator → says present, actually evicted | Vocabulary + correction for digest staleness | Phase G | CODE (small) |
+| RobinHood (OSDI'18) | Reallocate cache from cache-rich to cache-poor backends to hit p99 | The principle: allocate **warm-prefix residency to whoever is missing SLO**, not to maximize aggregate hits. A mechanism for your fairness result | Phase H/J | FRAME → CODE if time |
+| **LRB** (NSDI'20) | Approximate Belady with ML; **report the gap to offline optimal** (LRU is 25–40% off MIN) | The **evaluation practice** of reporting an optimality gap. Credibility multiplier | Phase H | CODE |
+| Cache-coherence directories (textbook) | Sparse / coarse-vector / limited-pointer imprecise directories | Framing: your router **is** a directory with imprecise state; a Bloom digest **is** a coarse-vector directory | related work | CITE |
+
+### D. Online algorithms & learning-augmented — *your theory*
+
+| Paper | Its idea | **What you take** | Where | Tier |
+|---|---|---|---|---|
+| **Ski rental** (Karlin et al.) | Rent-or-buy; 2-competitive deterministic, $e/(e-1)$ randomized | **The replication algorithm and its proof.** Your headline theoretical result | §5.2, Phase F | CODE |
+| **Lykouris & Vassilvitskii** (ICML'18) | Competitive caching with ML advice; consistency vs robustness | Framing your predictor as **untrusted advice**, the λ trust knob, and the experiment (goodput vs prediction error) | §5.3, Phase E/H | CODE |
+| Rohatgi (SODA'20); Wei & Zhang (NeurIPS'20) | Near-optimal / optimal robustness-consistency tradeoffs | The bound to cite for your λ interpolation | §5.3 | CITE |
+| Consistent Hashing w/ Bounded Loads (SODA'18) | No server exceeds $c\times$ average; provable | The **load-bound filter**, applied *before* the SLA filter | Phase E | CODE |
+| Rendezvous / HRW (1998) | Deterministic ranking of all servers per key; "next best" is trivial | **Cold-prefix placement** — first requests for a new prompt land on one replica, not all four | Phase E | CODE |
+| Online facility location w/ predictions | Opening a facility = paying a fixed cost | Optional second theory framing (which replicas host a prefix) | related work | CITE |
+
+### E. Overload control & admission
+
+| Paper | Its idea | **What you take** | Where | Tier |
+|---|---|---|---|---|
+| **Netflix concurrency-limits** | `Limit = RPS × latency` (Little's Law); Gradient = `minRTT/curRTT`; Vegas | **Per-replica adaptive concurrency**, replacing `max_in_flight=256` | Phase E | CODE |
+| Breakwater (OSDI'20) | Credit-based admission keyed on server queueing delay; demand speculation | Credits cost **no extra round trip** — the right shape at high RTT. Optional mechanism | Phase E/I | FRAME → CODE optional |
+| CoDel | Bound **sojourn time**, not queue length | Router-queue control under late binding | Phase I | CODE |
+
+### F. Failure detection & churn — *mandatory for Colab*
+
+| Paper | Its idea | **What you take** | Where | Tier |
+|---|---|---|---|---|
+| **φ-accrual** (SRDS'04) | Continuous suspicion level from the heartbeat-interval distribution | Replaces your fixed 5-consecutive-failure breaker; **feed φ into the routing score** so a degrading node bleeds traffic gradually | Phase B | CODE |
+| Lifeguard (2017) | Local health awareness — don't blame peers when *you* are slow | If all replicas' φ rise together, suspect your own uplink and suppress | Phase B | CODE (small) |
+| SWIM | Gossip membership | Citation for the dynamic-membership design | Phase B | CITE |
+| SpotServe (ASPLOS'24) | Preemption as first-class; grace period; KV migration by bipartite matching | The **framing** (preemption is a scheduling event, not an error). **Reject** migration with bandwidth arithmetic — the rejection is itself a finding | §8 | FRAME + reject |
+| ShuntServe (2026) | Heterogeneous **spot** GPUs; output-preserving migration | Closest churn-related work; position against it (same-cloud LAN, movable tensor state) | §3.1 | FRAME |
+
+### G. Heterogeneity, fairness, scheduling theory
+
+| Paper | Its idea | **What you take** | Where | Tier |
+|---|---|---|---|---|
+| Gavel (OSDI'20) | Throughput matrix per (job, GPU type) | Measure a **per-replica throughput scalar** so "heterogeneity" is empirical, not assumed — and report the spread as data | Phase E | CODE (small) |
+| **Oort** (OSDI'21) | Client selection with a **straggler penalty factor** under unreliable, heterogeneous, vanishing clients | The utility-with-penalty formulation for scoring flaky Colab nodes. Your nodes *are* FL clients | Phase B/E | CODE (small) |
+| Pollux (OSDI'21) | Goodput as the co-optimization objective | Precedent for goodput-as-objective outside DistServe | related work | CITE |
+| VTC (OSDI'24), DLPM (2025) | Cache-aware scheduling starves rare prefixes | The **fairness metric**: p99 TTFT of least-popular vs most-popular app under Zipf | Phase H | CODE |
+| Harchol-Balter (2013) | M/M/c; SRPT/SITA size-aware scheduling | M/M/c already used. **New**: prompt length is a known size proxy → size-aware routing (keep long prefills off the replica serving short interactive turns). Unexplored in this space | optional policy | FRAME → CODE optional |
+
+### H. Networking
+
+| Paper | Its idea | **What you take** | Where | Tier |
+|---|---|---|---|---|
+| Vivaldi (SIGCOMM'04) | Synthetic coordinates predict RTT, ~14% median error | Honestly: **nothing in code** at 4 nodes — direct probing is exact and cheap. Related work only | related work | CITE |
+| BBR / TCP Vegas | Congestion signals from RTT inflation | Lineage behind the adaptive concurrency limiter | §3.5 | CITE |
+
+### I. Evaluation methodology — *rescues the results chapter*
+
+| Paper | Its idea | **What you take** | Where | Tier |
+|---|---|---|---|---|
+| **Interleaving** (Airbnb; WWW'23) | Within-subject paired testing; 10–100× more efficient than A/B | **Per-request policy assignment + prefix-namespace partitioning per arm** | Phase C | CODE |
+| Nonstationary A/B (Mgmt. Science) | Ignoring nonstationarity → suboptimal variance **and non-vanishing bias** | Justification + time-stratified/paired analysis | Phase C | CODE |
+| Common random numbers (classic) | Same random stream across arms | Same seeded workload per arm — you're already 90% there from Phase 0 determinism | Phase C | CODE |
+
+### Tally
+
+| Tier | Count | Meaning |
+|---|---|---|
+| **CODE** | ~24 | Real mechanisms. 3 already shipped in Phase 0 |
+| **FRAME** | ~12 | Change the argument, the evaluation, or what you deliberately reject |
+| **CITE** | ~10 | Breadth in related work |
+
+### Already banked (Phase 0, committed)
+
+Three survey items are **already in the repo**: DistServe's goodput definition
+(`dual_slo_attainment`), Preble's Zipf shared-system-prompt workload
+(`scripts/workloads.py`), and Mooncake's use of engine-reported `cached_tokens` as
+ground truth (`true_cache_ratio`, `vllm:prefix_cache_hits`).
+
+## 12. References
 
 **LLM serving / prefix routing**
 1. Kwon et al. *Efficient Memory Management for LLM Serving with PagedAttention (vLLM).* SOSP 2023.
