@@ -219,6 +219,8 @@ Read: `swiftserve/{app,policy,state,prefix_trie,resilience,metrics_scraper,proxy
 | W11 | **Trie overflow = full reset** | `prefix_trie.py:record` | Dropping all cross-session state at a size threshold; should be LRU per replica |
 | W12 | **Sequential A/B benchmarking** | `scripts/benchmark.py` | Confounds policy with node drift (§3.9). The most damaging methodological issue in the repo |
 | W13 | **No offline/optimal baseline** | — | "Beats round-robin" is weak. "Achieves 87% of offline optimal" is strong |
+| **W14** | **The trie is dead on your own `shared_system` workload** | `policy.py:14` `_MIN_SHARED_PREFIX_MESSAGES = 2` | **Verified empirically.** Two sessions of the same app share exactly one message (the 2000-token system prompt); their user turns differ, so `longest_match` returns `depth=1`. The gate requires `>= 2`, so **cross-session routing never fires** — on the exact workload built to exercise it. The gate counts *messages*; the thing worth gating on is *shared tokens* |
+| **W15** | **A prefix can only be remembered on one replica** | `prefix_trie.py:record` sets `node.last_replica = replica_id` | **Verified:** recording the same prefix on replicas 0 then 1 leaves only replica 1. Replication is literally unrepresentable, so there is no "which holders exist, pick the least loaded" choice — and §5.2's ski-rental replication has nowhere to store its result. Needs `set[replica_id]`, i.e. a directory entry |
 
 ### 4.3 The trap nobody has flagged yet: your cache may be too big to matter
 
