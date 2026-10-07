@@ -57,5 +57,27 @@ class Settings:
     cold_start_ms_per_token: float = field(default_factory=lambda: float(os.environ.get("SWIFTSERVE_COLD_START_MS_PER_TOKEN", "0.0")))
     prefix_trie_max_depth: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_PREFIX_TRIE_MAX_DEPTH", "6")))
 
+    # -- block-level prefix index (policy "prefix_aware") ----------------
+    # Empty (default) = ByteChunkTokenizer, which needs no download but
+    # does NOT reproduce real token/block boundaries, so its cache
+    # predictions are systematically wrong. Set this to the served model id
+    # (e.g. "Qwen/Qwen2.5-3B-Instruct", needs `pip install transformers`)
+    # for predictions that line up with what the engine actually caches.
+    tokenizer: str = field(default_factory=lambda: os.environ.get("SWIFTSERVE_TOKENIZER", ""))
+    # MUST equal the replicas' vLLM `--block-size`. A router hashing
+    # 16-token blocks against an engine caching 32-token blocks shares no
+    # hashes at all, so every prediction silently becomes a miss.
+    block_size: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_BLOCK_SIZE", "16")))
+    # Per-replica cap on tracked blocks, imitating the engine's own LRU so
+    # the index's belief decays roughly when the real cache does. vLLM logs
+    # its real block count (`# GPU blocks:`) at startup -- set this to it.
+    index_max_blocks: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_INDEX_MAX_BLOCKS", "20000")))
+    # SGLang's cache_threshold: route on a match once this fraction of the
+    # prompt's blocks are already warm there.
+    cache_threshold: float = field(default_factory=lambda: float(os.environ.get("SWIFTSERVE_CACHE_THRESHOLD", "0.5")))
+    # Absolute floor, OR'd with the ratio above: enough skipped prefill to
+    # be worth distorting load-balancing for, regardless of prompt length.
+    min_match_tokens: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_MIN_MATCH_TOKENS", "256")))
+
 
 settings = Settings()

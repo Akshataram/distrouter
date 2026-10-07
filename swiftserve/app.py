@@ -25,12 +25,14 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from swiftserve import metrics
 from swiftserve.config import settings
 from swiftserve.metrics_scraper import scrape_loop
-from swiftserve.policy import POLICIES, Policy, SwiftServePolicy
+from swiftserve.policy import POLICIES, Policy, PrefixAwarePolicy, SwiftServePolicy
+from swiftserve.prefix_index import PrefixIndex
 from swiftserve.prefix_trie import PrefixCacheTrie
 from swiftserve.proxy import forward_chat_completion
 from swiftserve.request_context import configure_logging, get_request_id, reset_request_id, set_request_id
 from swiftserve.resilience import AdmissionController, CircuitState
 from swiftserve.state import ReplicaState
+from swiftserve.tokenization import build_tokenizer
 
 configure_logging()
 logger = logging.getLogger("swiftserve.app")
@@ -58,6 +60,26 @@ if settings.policy == "swiftserve":
     # as the rest of the router's config, instead of SwiftServePolicy's
     # zero-arg default.
     policy = SwiftServePolicy(PrefixCacheTrie(ttl_s=settings.cache_affinity_ttl_s, max_depth=settings.prefix_trie_max_depth))
+elif settings.policy == "prefix_aware":
+    # Also special-cased: it needs a tokenizer and a block index sized from
+    # config, which a zero-arg constructor cannot supply.
+    _tokenizer = build_tokenizer(settings.model_name, settings.tokenizer)
+    policy = PrefixAwarePolicy(
+        tokenizer=_tokenizer,
+        index=PrefixIndex(block_size=settings.block_size, max_blocks_per_replica=settings.index_max_blocks),
+        cache_threshold=settings.cache_threshold,
+        min_match_tokens=settings.min_match_tokens,
+        # Namespacing by model keeps hashes from one model's cache being
+        # credited to another's if the router is ever repointed.
+        namespace=settings.model_name,
+    )
+    if not settings.tokenizer:
+        logger.warning(
+            "policy=prefix_aware is using the ByteChunkTokenizer fallback (SWIFTSERVE_TOKENIZER unset). "
+            "Its block boundaries do NOT match the engine's, so cache predictions will be "
+            "systematically wrong. Set SWIFTSERVE_TOKENIZER=%s for real predictions.",
+            settings.model_name,
+        )
 else:
     policy = POLICIES[settings.policy]()
 admission = AdmissionController(max_in_flight=settings.admission_max_in_flight)
@@ -161,12 +183,19 @@ async def router_metrics():
 
 @app.get("/status", dependencies=[Depends(_require_api_token)])
 async def status():
-    return {
+    payload: dict[str, object] = {
         "model": settings.model_name,
         "policy": policy.name,
         "admission": admission.status(),
         "replicas": [r.status() for r in replicas],
     }
+    index = getattr(policy, "index", None)
+    if index is not None:
+        payload["prefix_index"] = index.status()
+        # Which tokenizer is live matters for interpreting every cache
+        # prediction below it, so it is reported rather than implied.
+        payload["tokenizer"] = getattr(policy, "tokenizer_name", None)
+    return payload
 
 
 @app.post("/v1/chat/completions", dependencies=[Depends(_require_api_token)])
@@ -224,11 +253,21 @@ async def chat_completions(request: Request):
     # estimate) would otherwise never route anything there again, leaving
     # it half-open forever instead of closing or re-opening.
     half_open_probes = [r for r in available if r.circuit.state is CircuitState.HALF_OPEN]
-    chosen = (
-        _pick_half_open_probe(half_open_probes)
-        if half_open_probes
-        else policy.select(session_id, sla_ms, available, messages)
-    )
+    # How many prompt tokens the router *predicts* are already warm on the
+    # replica it picked. 0 when the policy has no block-level opinion (the
+    # baselines, or a half-open probe that overrode the policy). Published
+    # as a response header so the benchmark can score this prediction
+    # against the engine's own reported `cached_tokens` -- the whole point
+    # being that it is a prediction and its error is measurable.
+    predicted_cached_tokens = 0
+    if half_open_probes:
+        chosen = _pick_half_open_probe(half_open_probes)
+    elif hasattr(policy, "select_with_prediction"):
+        chosen, predicted_cached_tokens = policy.select_with_prediction(
+            session_id, sla_ms, available, messages
+        )
+    else:
+        chosen = policy.select(session_id, sla_ms, available, messages)
     was_cache_hit = chosen.has_warm_cache(session_id)
     chosen.touch_session(session_id)
     chosen.circuit.mark_dispatched()
@@ -280,4 +319,5 @@ async def chat_completions(request: Request):
         return JSONResponse(status_code=502, content={"error": f"upstream replica unreachable: {exc}"})
 
     response.headers["X-SwiftServe-Cache-Hit"] = "true" if was_cache_hit else "false"
+    response.headers["X-SwiftServe-Predicted-Cached-Tokens"] = str(predicted_cached_tokens)
     return response
