@@ -39,3 +39,10 @@ disallow_untyped_defs = false
 [[tool.mypy.overrides]]
 module = "prometheus_client.*"
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Optional dependency: only installed on hosts that want real tokenization
+# (HFChatTokenizer). The router and its tests run without it, falling back
+# to ByteChunkTokenizer, so mypy must not require its stubs.
+module = "transformers.*"
+ignore_missing_imports = true
