@@ -71,7 +71,18 @@ policy are not on `main`. Confirm the `git log` line shows a recent commit.
 ## Cell 3 — launch vLLM behind the sidecar (~5–10 min, downloads weights)
 
 ```python
-import os, subprocess, time, urllib.request, urllib.error
+import time
+import os, subprocess, urllib.request, urllib.error
+
+# Idempotent: re-running this cell must not collide with a previous attempt.
+# Without this you get "[Errno 98] address already in use" on SIDECAR_PORT,
+# because the old sidecar is still alive holding the port and the GPU.
+!pkill -9 -f replica_sidecar || true
+!pkill -9 -f vllm.entrypoints || true
+time.sleep(8)
+print("GPU memory after cleanup (want ~0 MiB used):")
+!nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
+print()
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
