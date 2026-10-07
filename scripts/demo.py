@@ -46,6 +46,7 @@ import statistics
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -57,7 +58,7 @@ from scripts.benchmark import (  # noqa: E402
     percentile,
     run_session_from_requests,
 )
-from scripts.workloads import shared_system_prompt  # noqa: E402
+from scripts.workloads import Workload, shared_system_prompt  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -101,6 +102,32 @@ async def reset_replica_caches(replica_urls: list[str]) -> list[str]:
             else:
                 failed.append(url)
     return failed
+
+
+def isolate_workload(workload: Workload, salt: str) -> Workload:
+    """Give one policy its own prefix namespace.
+
+    Policies run sequentially against a shared cluster, so without this the
+    later ones inherit the earlier ones' warm caches. That shows up as the
+    cache ratio rising monotonically in *run order* -- the ordering effect
+    swamping the policy effect, which makes the comparison meaningless no
+    matter how large the apparent difference.
+
+    Resetting the engine cache between policies would also work, but only
+    if every replica exposes a reset endpoint; this does not depend on one.
+    The marker goes at the FRONT of the system message so it changes block
+    0 and therefore every chained hash after it, and the session ids are
+    salted too so per-session affinity cannot carry over either. Length and
+    structure are otherwise unchanged, so the arms stay comparable.
+    """
+    sessions = []
+    for s in workload.sessions:
+        turns = [list(t) for t in s.turns]
+        first = dict(turns[0][0])
+        first["content"] = f"[ns:{salt}] " + str(first.get("content", ""))
+        turns[0][0] = first
+        sessions.append(replace(s, turns=turns, session_id=f"{salt}-{s.session_id}"))
+    return replace(workload, sessions=sessions)
 
 
 def spawn_fake_replicas(count: int, kv_blocks: int, prefill_ms: float, decode_ms: float,
@@ -290,12 +317,18 @@ async def main_async(args: argparse.Namespace) -> int:
 
         reports: dict[str, dict] = {}
         for policy in [p.strip() for p in args.policies.split(",") if p.strip()]:
-            failed = await reset_replica_caches(replica_urls)
-            if failed:
-                print(f"  WARNING: could not reset the prefix cache on {failed}.")
-                print("           This policy inherits the previous one's warm cache, so the")
-                print("           comparison below understates the difference. Restart the")
-                print("           replicas between policies for a clean run.")
+            if args.isolate_policies:
+                # Each policy gets its own prefix namespace, so no policy can
+                # inherit another's warm cache regardless of run order.
+                policy_workload = isolate_workload(workload, policy)
+            else:
+                policy_workload = workload
+                failed = await reset_replica_caches(replica_urls)
+                if failed:
+                    print(f"  WARNING: could not reset the prefix cache on {failed}, and")
+                    print("           --no-isolate-policies is set. Later policies inherit")
+                    print("           earlier ones' warm caches: the ranking below reflects")
+                    print("           RUN ORDER, not policy quality. Do not report it.")
 
             router_proc, router_url = spawn_router(
                 policy, replica_urls, args.model, args.tokenizer,
@@ -306,9 +339,9 @@ async def main_async(args: argparse.Namespace) -> int:
                       file=sys.stderr)
                 return 1
 
-            print(f"  [{policy}] running {len(workload.sessions)} sessions...", end="", flush=True)
+            print(f"  [{policy}] running {len(policy_workload.sessions)} sessions...", end="", flush=True)
             started = time.monotonic()
-            results = await run_workload(router_url, args.model, workload.sessions, args.concurrency)
+            results = await run_workload(router_url, args.model, policy_workload.sessions, args.concurrency)
             reports[policy] = summarize(results)
             print(f" done in {time.monotonic() - started:.1f}s "
                   f"(TTFT p50 {_fmt(reports[policy]['ttft_p50'], 'ms')}, "
@@ -361,6 +394,13 @@ def main() -> None:
     parser.add_argument("--max-tokens", type=int, default=8)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--isolate-policies", dest="isolate_policies", action="store_true", default=True,
+        help="give each policy its own prefix namespace so it cannot inherit another's warm "
+             "cache (default; without it the ranking reflects run order)")
+    parser.add_argument(
+        "--no-isolate-policies", dest="isolate_policies", action="store_false",
+        help="share one prefix namespace across policies and rely on cache resets instead")
     parser.add_argument("--log-dir", default="demo_logs")
 
     args = parser.parse_args()
