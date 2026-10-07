@@ -157,7 +157,8 @@ def spawn_fake_replicas(count: int, kv_blocks: int, prefill_ms: float, decode_ms
 
 
 def spawn_router(policy: str, replica_urls: list[str], model: str, tokenizer: str,
-                 block_size: int, min_match_tokens: int, log_dir: Path) -> tuple[subprocess.Popen, str]:
+                 block_size: int, min_match_tokens: int, log_dir: Path,
+                 max_num_seqs: int = 32) -> tuple[subprocess.Popen, str]:
     port = _free_port()
     env = {
         **os.environ,
@@ -167,6 +168,14 @@ def spawn_router(policy: str, replica_urls: list[str], model: str, tokenizer: st
         "SWIFTSERVE_TOKENIZER": tokenizer,
         "SWIFTSERVE_BLOCK_SIZE": str(block_size),
         "SWIFTSERVE_MIN_MATCH_TOKENS": str(min_match_tokens),
+        # The replicas run with `--max-num-seqs 32`, so each can genuinely
+        # batch that many requests. Left at the router's default floor of 1,
+        # the SLA gate believes a replica with just two requests in flight is
+        # saturated, estimates ~service_time*3 > the 3000ms SLA, and VETOES a
+        # correct prefix match -- measured in simulation to cost 10-25 points
+        # of cache ratio at real latencies. This is configuration the
+        # deployer knows (it is a launch flag), not something to hide.
+        "SWIFTSERVE_ASSUMED_MAX_BATCH_SIZE": str(max_num_seqs),
         # Keep the scrape loop lively so load signals are fresh enough for a
         # short demo run.
         "SWIFTSERVE_SCRAPE_INTERVAL_S": "1",
@@ -332,7 +341,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
             router_proc, router_url = spawn_router(
                 policy, replica_urls, args.model, args.tokenizer,
-                args.block_size, args.min_match_tokens, log_dir,
+                args.block_size, args.min_match_tokens, log_dir, args.max_num_seqs,
             )
             if not await _wait_healthy(router_url):
                 print(f"ERROR: router for {policy} never became healthy; see {log_dir}/router-{policy}.log",
@@ -379,6 +388,8 @@ def main() -> None:
                              "replicas serve, or the router's block hashes never line up with the engine's.")
     parser.add_argument("--block-size", type=int, default=16, help="must match the replicas' vLLM --block-size")
     parser.add_argument("--min-match-tokens", type=int, default=256)
+    parser.add_argument("--max-num-seqs", type=int, default=32,
+                        help="must equal the replicas' vLLM --max-num-seqs; sets the router's batch-capacity floor")
 
     parser.add_argument("--num-replicas", type=int, default=3, help="fake-replica mode only")
     parser.add_argument("--kv-blocks", type=int, default=400,
