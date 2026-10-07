@@ -68,70 +68,92 @@ policy are not on `main`. Confirm the `git log` line shows a recent commit.
 
 ---
 
-## Cell 3 — launch vLLM behind the sidecar (~5–10 min, downloads weights)
+## Cell 3 — launch vLLM, with live progress (~5–10 min, downloads weights)
+
+This is the version that worked on real T4s. vLLM runs **alone** with its
+own log, and the cell prints a progress line every 10 seconds so you can tell
+"downloading" from "hung", and prints vLLM's real error if it dies.
+
+**Do not press the stop button on this cell** — Colab's interrupt kills the
+subprocesses it started.
 
 ```python
-import time
-import os, subprocess, urllib.request, urllib.error
+import time, os, subprocess, urllib.request
 
-# Idempotent: re-running this cell must not collide with a previous attempt.
-# Without this you get "[Errno 98] address already in use" on SIDECAR_PORT,
-# because the old sidecar is still alive holding the port and the GPU.
 !pkill -9 -f replica_sidecar || true
 !pkill -9 -f vllm.entrypoints || true
 time.sleep(8)
-print("GPU memory after cleanup (want ~0 MiB used):")
-!nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
-print()
+!nvidia-smi --query-gpu=memory.used --format=csv,noheader
 
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
-sidecar_log = open(f"{LOG_DIR}/sidecar.log", "w")
+LOG_DIR = "logs"; os.makedirs(LOG_DIR, exist_ok=True)
+vllm_log_path = f"{LOG_DIR}/vllm.log"
+vllm_log = open(vllm_log_path, "w")
 
-vllm_cmd = (
-    f"python -m vllm.entrypoints.openai.api_server "
-    f"--model {MODEL} --port {VLLM_PORT} "
-    f"--enable-prefix-caching "          # the engine feature this project exploits
-    f"--enable-prompt-tokens-details "   # MANDATORY: without it usage.cached_tokens is never reported
-    f"--block-size 16 "                  # must equal the router's SWIFTSERVE_BLOCK_SIZE
-    f"--max-num-seqs 32 --max-model-len 8192 --dtype half "
-    f"--num-gpu-blocks-override {KV_BLOCKS} "
-    f"--gpu-memory-utilization 0.90"
+# max-model-len MUST be <= KV_BLOCKS * 16, or vLLM refuses to start.
+# 375 blocks * 16 = 6000 tokens, so 8192 crashes it and 4096 is fine.
+MAX_MODEL_LEN = 4096
+assert MAX_MODEL_LEN <= KV_BLOCKS * 16, "max-model-len exceeds the KV cache; vLLM will refuse to start"
+
+vllm = subprocess.Popen(
+    ["python", "-m", "vllm.entrypoints.openai.api_server",
+     "--model", MODEL, "--port", str(VLLM_PORT),
+     "--enable-prefix-caching", "--enable-prompt-tokens-details",
+     "--block-size", "16", "--max-num-seqs", "32",
+     "--max-model-len", str(MAX_MODEL_LEN),
+     "--dtype", "half",
+     "--num-gpu-blocks-override", str(KV_BLOCKS),
+     "--gpu-memory-utilization", "0.90"],
+    stdout=vllm_log, stderr=subprocess.STDOUT,
 )
+print(f"vllm pid={vllm.pid}, log={vllm_log_path}\n")
 
+start = time.monotonic()
+while time.monotonic() - start < 1800:
+    if vllm.poll() is not None:
+        print(f"\n!! vLLM EXITED (code {vllm.returncode}). Last 30 lines:\n")
+        !tail -30 {vllm_log_path}
+        break
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{VLLM_PORT}/health", timeout=3) as r:
+            if r.status == 200:
+                print(f"\n*** vLLM HEALTHY after {(time.monotonic()-start)/60:.1f} min ***")
+                !grep -iE "GPU blocks|KV cache size" {vllm_log_path} | tail -3
+                break
+    except Exception:
+        pass
+    with open(vllm_log_path) as f:
+        lines = [l.strip() for l in f if l.strip()]
+    print(f"[{(time.monotonic()-start)/60:5.1f}m] {lines[-1][:140] if lines else '(no output yet)'}")
+    time.sleep(10)
+```
+
+## Cell 3b — start the sidecar (run only after Cell 3 says HEALTHY)
+
+```python
+import subprocess, time, urllib.request
+
+sidecar_log = open(f"{LOG_DIR}/sidecar.log", "w")
 sidecar = subprocess.Popen(
     ["python", "-m", "swiftserve.replica_sidecar",
      "--upstream-url", f"http://127.0.0.1:{VLLM_PORT}",
      "--port", str(SIDECAR_PORT),
-     "--admin-token", ADMIN_TOKEN,
-     "--supervise", vllm_cmd],
+     "--admin-token", ADMIN_TOKEN],
     stdout=sidecar_log, stderr=subprocess.STDOUT,
 )
-print(f"sidecar pid={sidecar.pid}\nsupervising: {vllm_cmd}\n")
-
 def tail_log(path=f"{LOG_DIR}/sidecar.log", n=40):
+    """Used by Cell 4 (vLLM's log) and Cell 5 (the tunnel's log)."""
     with open(path) as f:
         return "".join(f.readlines()[-n:])
 
-healthy, deadline = False, time.monotonic() + 900
-while time.monotonic() < deadline:
-    if sidecar.poll() is not None:
-        print("!! sidecar died. Log tail:\n" + tail_log()); break
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{SIDECAR_PORT}/health", timeout=3) as r:
-            if r.status == 200:
-                healthy = True; break
-    except Exception:
-        pass
-    time.sleep(5)
-
-print(f"HEALTHY: real vLLM serving {MODEL} behind the sidecar on :{SIDECAR_PORT}"
-      if healthy else "!! not healthy in time. Log tail:\n" + tail_log())
+time.sleep(6)
+with urllib.request.urlopen(f"http://127.0.0.1:{SIDECAR_PORT}/health", timeout=10) as r:
+    print(f"sidecar -> vLLM health: {r.status}   (200 = good, 502 = vLLM unreachable)")
 ```
 
-`--supervise` means the sidecar **owns** the vLLM process and can kill and
-relaunch it on command — that is what makes the failover demo possible over
-the tunnel, without touching this notebook mid-presentation.
+Started **without** `--supervise`, so `/chaos/kill` and `/chaos/restart`
+return 400. The soft faults (`partition`, `latency`, `error-rate`) all work.
+Supervision was dropped because it hid vLLM's own errors, which is what made
+the first launch impossible to debug.
 
 ---
 
@@ -144,7 +166,7 @@ is much harder.
 import json, time, re, urllib.request
 
 # --- check 1: did --num-gpu-blocks-override actually take effect? ---------
-log = tail_log(n=600)
+log = tail_log(f"{LOG_DIR}/vllm.log", n=600)
 found = re.findall(r"GPU (?:KV cache size|blocks)[^0-9]*([0-9,]+)", log)
 print(f"KV_BLOCKS requested : {KV_BLOCKS}")
 print(f"vLLM reported       : {found if found else 'NOT FOUND -- search the log manually'}")
