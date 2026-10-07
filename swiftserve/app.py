@@ -73,6 +73,24 @@ elif settings.policy == "prefix_aware":
         # credited to another's if the router is ever repointed.
         namespace=settings.model_name,
     )
+    # Fail fast rather than silently behaving like a load balancer: a
+    # tokenizer that returns too few ids yields no full blocks, so the index
+    # matches nothing and every cache prediction is 0. That is invisible in
+    # the output -- it cost a whole 4-GPU experiment run to notice.
+    _probe = [{"role": "system", "content": "probe " * 400}, {"role": "user", "content": "hi"}]
+    _probe_tokens = _tokenizer.encode_chat(_probe)
+    _probe_blocks = len(_probe_tokens) // settings.block_size
+    if _probe_blocks < 2:
+        raise RuntimeError(
+            f"tokenizer {_tokenizer.name!r} produced only {len(_probe_tokens)} tokens for a "
+            f"~400-word probe prompt ({_probe_blocks} blocks of {settings.block_size}). The prefix "
+            f"index cannot work with this, and prefix_aware would silently degrade to least-loaded. "
+            f"Check SWIFTSERVE_TOKENIZER and the installed transformers version."
+        )
+    logger.info(
+        "prefix index live: tokenizer=%s, probe produced %d tokens = %d blocks of %d",
+        _tokenizer.name, len(_probe_tokens), _probe_blocks, settings.block_size,
+    )
     if not settings.tokenizer:
         logger.warning(
             "policy=prefix_aware is using the ByteChunkTokenizer fallback (SWIFTSERVE_TOKENIZER unset). "

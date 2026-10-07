@@ -117,3 +117,55 @@ def test_hf_tokenizer_raises_an_actionable_error_when_transformers_is_missing():
 
     with pytest.raises(RuntimeError, match="transformers"):
         HFChatTokenizer("Qwen/Qwen2.5-3B-Instruct").encode_chat(MESSAGES)
+
+
+# -- the return-shape bug that cost a 4-GPU experiment run -----------------
+
+
+class _FakeHF:
+    """Stands in for transformers.AutoTokenizer with a configurable return
+    shape, so every version's behaviour is covered without the dependency."""
+
+    def __init__(self, result):
+        self._result = result
+
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt, return_dict=False):
+        return self._result
+
+
+def _hf_with(result):
+    tok = HFChatTokenizer("fake/model")
+    tok._tokenizer = _FakeHF(result)
+    return tok
+
+
+def test_flat_list_of_ids_passes_through():
+    assert _hf_with(list(range(40))).encode_chat(MESSAGES) == list(range(40))
+
+
+def test_batch_of_one_nested_list_is_unwrapped():
+    assert _hf_with([list(range(40))]).encode_chat(MESSAGES) == list(range(40))
+
+
+def test_batch_encoding_mapping_uses_input_ids():
+    """The real failure: newer transformers returns a BatchEncoding, and
+    list() on it yields its KEYS -- two strings, i.e. zero full blocks, so
+    the prefix index matches nothing and the router silently becomes a load
+    balancer."""
+    mapping = {"input_ids": list(range(40)), "attention_mask": [1] * 40}
+    assert _hf_with(mapping).encode_chat(MESSAGES) == list(range(40))
+
+
+def test_mapping_without_input_ids_raises():
+    with pytest.raises(RuntimeError, match="without 'input_ids'"):
+        _hf_with({"attention_mask": [1, 2, 3]}).encode_chat(MESSAGES)
+
+
+def test_string_keys_are_rejected_rather_than_hashed_as_tokens():
+    with pytest.raises(RuntimeError, match="integer token ids"):
+        _hf_with(["input_ids", "attention_mask"]).encode_chat(MESSAGES)
+
+
+def test_empty_token_sequence_raises():
+    with pytest.raises(RuntimeError, match="empty token sequence"):
+        _hf_with([]).encode_chat(MESSAGES)

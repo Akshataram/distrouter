@@ -88,6 +88,44 @@ def render_chat_fallback(messages: list[dict]) -> str:
     return "".join(parts) + "<|im_start|>assistant\n"
 
 
+def _normalize_token_ids(tokens: object, source: str) -> list[int]:
+    """Coerce whatever a tokenizer returned into a flat list of ints, and
+    refuse anything else loudly.
+
+    Tokenizer return shapes vary by library version: a flat list, a
+    batch-of-one nested list, or a mapping with an ``input_ids`` key. All
+    three are accepted. Anything that is *not* a sequence of ints is a hard
+    error rather than a best-effort guess, because the failure it causes
+    downstream is invisible -- a too-short token list yields no full blocks,
+    so the prefix index matches nothing and the router merely looks like a
+    load balancer. A loud failure at startup beats a silent one that costs
+    an experiment."""
+    # Mapping (BatchEncoding and friends): take input_ids.
+    if hasattr(tokens, "keys"):
+        mapping: dict = dict(tokens)  # type: ignore[call-overload]
+        if "input_ids" not in mapping:
+            raise RuntimeError(
+                f"{source} returned a mapping without 'input_ids' (keys={list(mapping)[:5]})"
+            )
+        tokens = mapping["input_ids"]
+
+    seq = list(tokens)  # type: ignore[call-overload]
+
+    # Batch of one: [[id, id, ...]]
+    if len(seq) == 1 and isinstance(seq[0], (list, tuple)):
+        seq = list(seq[0])
+
+    if not seq:
+        raise RuntimeError(f"{source} returned an empty token sequence")
+    if not all(isinstance(t, int) for t in seq):
+        raise RuntimeError(
+            f"{source} did not return integer token ids (got {type(seq[0]).__name__}: "
+            f"{seq[:4]!r}). The prefix index needs real token ids; with anything else "
+            f"it silently matches nothing."
+        )
+    return seq
+
+
 class ByteChunkTokenizer:
     """Deterministic, download-free stand-in. Every 4 UTF-8 bytes of the
     rendered chat string become one pseudo-token id.
@@ -141,14 +179,20 @@ class HFChatTokenizer:
 
     def encode_chat(self, messages: list[dict]) -> list[int]:
         tokenizer = self._load()
+        # `return_dict=False` is load-bearing. Newer transformers default
+        # apply_chat_template(tokenize=True) to returning a BatchEncoding,
+        # and `list(BatchEncoding)` yields its KEYS -- ['input_ids',
+        # 'attention_mask'] -- i.e. two "tokens". That is below block_size,
+        # so block_hashes() produces zero blocks, the index never matches
+        # anything, every request predicts 0 cached tokens, and the
+        # prefix-aware policy silently degenerates into least-loaded while
+        # still looking like it is working. Found exactly that way on a
+        # real 4-GPU run: every policy tied and prediction error equalled
+        # the true cache ratio.
         tokens = tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True
+            messages, tokenize=True, add_generation_prompt=True, return_dict=False
         )
-        # Some versions return a BatchEncoding / nested list depending on
-        # the template; normalize to a flat list of ints.
-        if tokens and isinstance(tokens[0], list):
-            tokens = tokens[0]
-        return list(tokens)
+        return _normalize_token_ids(tokens, source=self.name)
 
 
 def build_tokenizer(model_name: str, tokenizer_spec: str | None) -> Tokenizer:
