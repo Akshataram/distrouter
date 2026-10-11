@@ -16,7 +16,7 @@
 //     engine behaviour this page cannot verify.
 
 import { chat } from "./api.js";
-import { fmtMs, fmtNum, h, mean, percentile, replicaChip, shortId, sleep, uid } from "./util.js";
+import { fill, fmtMs, fmtNum, h, mean, percentile, replicaChip, shortId, sleep, uid } from "./util.js";
 
 function sampleSystemPrompt(tokens) {
   const topics = ["card disputes", "wire transfers", "overdraft fees", "mortgage questions", "fraud alerts", "account closure"];
@@ -177,7 +177,7 @@ export function initLoadTest(root, ctx) {
     // progress
     const pct = run.total ? Math.round((run.settled / run.total) * 100) : 0;
     const seenDisconnect = reqs.filter((r) => r.server.state === "client_disconnected").length;
-    el("lt-progress").replaceChildren(
+    fill(el("lt-progress"), 
       run.total ? h("div", { class: "progress", role: "progressbar", "aria-valuenow": pct, "aria-valuemin": 0, "aria-valuemax": 100 }, h("i", { style: { width: pct + "%" } })) : h("p", { class: "muted" }, "No run yet."),
       run.total ? h("div", { class: "stats" },
         stat("launched", `${run.launched}/${run.total}`), stat("in flight", run.inflight.size), stat("succeeded", run.ok, "ok"), stat("failed", run.failed, run.failed ? "bad" : ""),
@@ -188,7 +188,7 @@ export function initLoadTest(root, ctx) {
     const tally = store.tally(reqs);
     const ids = Object.keys(tally).map(Number).sort((a, b) => a - b);
     const max = Math.max(1, ...ids.map((r) => Math.max(tally[r].selected, tally[r].served)));
-    el("lt-dist").replaceChildren(ids.length
+    fill(el("lt-dist"), ids.length
       ? h("div", {}, ...ids.map((rid) => h("div", { class: "distrow" },
           h("div", { class: "distlabel" }, replicaChip(rid, replicaLabel(rid))),
           h("div", { class: "bars" },
@@ -202,7 +202,7 @@ export function initLoadTest(root, ctx) {
     const done = reqs.filter((r) => r.server.state === "completed");
     const ttft = done.map((r) => r.server.ttft_ms), total = done.map((r) => r.server.total_ms), itl = done.map((r) => r.server.itl_mean_ms);
     const toks = done.reduce((a, r) => a + (r.server.completion_tokens || 0), 0);
-    el("lt-summary").replaceChildren(done.length
+    fill(el("lt-summary"), done.length
       ? h("div", { class: "stats" },
           stat("TTFT p50 (router)", fmtMs(percentile(ttft, 50))), stat("TTFT p95", fmtMs(percentile(ttft, 95))),
           stat("total p50 (router)", fmtMs(percentile(total, 50))), stat("total p95", fmtMs(percentile(total, 95))),
@@ -213,7 +213,7 @@ export function initLoadTest(root, ctx) {
     // table
     const only = el("lt-onlyfail").checked;
     const rows = reqs.slice().reverse().filter((r) => !only || r.server.state === "failed" || r.server.state === "rejected" || (r.client && (r.client.status === "error"))).slice(0, 200);
-    el("lt-table").replaceChildren(rows.length
+    fill(el("lt-table"), rows.length
       ? h("table", { class: "grid" },
           h("thead", {}, h("tr", {}, ...["#", "Request", "State", "Selected", "Served", "HTTP", "TTFT", "Total", "Prompt / compl. / cached", "Error"].map((t) => h("th", {}, t)))),
           h("tbody", {}, ...rows.map((r) => {

@@ -14,7 +14,7 @@
 // (from events), and the operator-supplied GPU label -- or "GPU mapping
 // unavailable". A GPU id is never derived from a replica number.
 
-import { describeDecision, h, replicaChip, shortId } from "./util.js";
+import { describeDecision, fill, h, replicaChip, shortId } from "./util.js";
 
 const NS = "http://www.w3.org/2000/svg";
 const svgEl = (tag, attrs = {}, ...kids) => {
@@ -207,7 +207,7 @@ export function initRouting(root, ctx) {
   function updateTimeline() {
     const reqs = store.all().filter((r) => r.server.t_received).slice(-26);
     const box = el("rt-timeline");
-    if (!reqs.length) { box.replaceChildren(h("p", { class: "muted" }, "Requests appear here as the router handles them.")); return; }
+    if (!reqs.length) { fill(box, h("p", { class: "muted" }, "Requests appear here as the router handles them.")); return; }
     const start = Math.min(...reqs.map((r) => r.server.t_received * 1000));
     const end = Math.max(...reqs.map((r) => r.server.t_received * 1000 + (r.server.at.finished ?? r.server.at.first_token ?? r.server.at.dispatch ?? 0) + 30));
     const span = Math.max(end - start, 200);
@@ -226,12 +226,12 @@ export function initRouting(root, ctx) {
       return h("div", { class: "trow" },
         h("div", { class: "tlabel" }, h("code", {}, shortId(r.id)), " ", s.served !== null ? replicaChip(s.served, replicaLabel(s.served)) : s.selected !== null ? replicaChip(s.selected, replicaLabel(s.selected)) : null, h("small", {}, ` ${s.state}`)), bar);
     });
-    box.replaceChildren(h("div", { class: "tlegend" }, h("i", { class: "seg seg-route" }), " routing  ", h("i", { class: "seg seg-wait" }), " waiting for first token  ", h("i", { class: "seg seg-decode" }), " streaming  ", h("i", { class: "seg seg-fail" }), " failed"), ...rows);
+    fill(box, h("div", { class: "tlegend" }, h("i", { class: "seg seg-route" }), " routing  ", h("i", { class: "seg seg-wait" }), " waiting for first token  ", h("i", { class: "seg seg-decode" }), " streaming  ", h("i", { class: "seg seg-fail" }), " failed"), ...rows);
   }
 
   function updateDecisions() {
     const reqs = store.all().filter((r) => r.server.path).slice(-18).reverse();
-    el("rt-decisions").replaceChildren(reqs.length
+    fill(el("rt-decisions"), reqs.length
       ? h("table", { class: "grid" }, h("thead", {}, h("tr", {}, ...["Time", "Request", "Path", "Selected", "Dispatched", "Served", "Why (from the policy's own record)"].map((t) => h("th", {}, t)))),
           h("tbody", {}, ...reqs.map((r) => {
             const s = r.server;
@@ -246,7 +246,7 @@ export function initRouting(root, ctx) {
 
   function updateHealth() {
     const evs = store.replicaEvents;
-    el("rt-health").replaceChildren(evs.length
+    fill(el("rt-health"), evs.length
       ? h("ul", { class: "plain" }, ...evs.slice(0, 12).map((e) => h("li", {}, new Date(e.ts * 1000).toLocaleTimeString(), " · ", replicaChip(e.replica, replicaLabel(e.replica)),
           e.circuit.from !== e.circuit.to ? ` circuit ${e.circuit.from} → ${e.circuit.to}` : "", e.healthy.from !== e.healthy.to ? ` health ${e.healthy.from ? "up" : "down"} → ${e.healthy.to ? "up" : "down"}` : "")))
       : h("p", { class: "muted" }, "No replica state changes since this page loaded."));

@@ -125,3 +125,9 @@ export function describeDecision(server) {
       return `${path}: ${JSON.stringify(ex).slice(0, 160)}`;
   }
 }
+
+// Replace an element's children, skipping null/undefined/false. The DOM's own
+// replaceChildren/append would render a bare `null` as the text "null".
+export function fill(el, ...kids) {
+  el.replaceChildren(...kids.flat().filter((k) => k !== null && k !== undefined && k !== false));
+}

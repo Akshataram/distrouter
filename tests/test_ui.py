@@ -42,3 +42,13 @@ def test_javascript_syntax_and_store_unit_tests():
     out = subprocess.run(["node", str(Path(__file__).parent / "ui" / "store.test.mjs")], capture_output=True, text=True)
     assert out.returncode == 0, out.stdout + out.stderr
     assert "tests passed" in out.stdout
+
+
+def test_views_never_call_replace_children_directly():
+    """DOM replaceChildren(null) renders the text "null" (seen as a stray "null" in the load-test
+    progress panel); views must go through util.fill, which skips null/false."""
+    import pathlib
+
+    for f in pathlib.Path("swiftserve/ui/js").glob("*.js"):
+        if f.name != "util.js":
+            assert "replaceChildren" not in f.read_text(), f.name

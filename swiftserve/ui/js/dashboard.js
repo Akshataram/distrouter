@@ -4,7 +4,7 @@
 // never substitutes a stand-in (no CPU-for-GPU, no invented VRAM, no guessed
 // queue depth).
 
-import { fmtMs, fmtNum, fmtPct, h, replicaChip } from "./util.js";
+import { fill, fmtMs, fmtNum, fmtPct, h, replicaChip } from "./util.js";
 
 const HISTORY = 60;
 
@@ -83,25 +83,25 @@ export function initDashboard(root, ctx) {
 
   function render() {
     const snap = store.snapshot;
-    if (!snap) { el("db-banner").replaceChildren(h("p", { class: "muted" }, "Waiting for the first snapshot from the router…")); return; }
+    if (!snap) { fill(el("db-banner"), h("p", { class: "muted" }, "Waiting for the first snapshot from the router…")); return; }
 
-    el("db-banner").replaceChildren(
+    fill(el("db-banner"), 
       h("div", { class: `banner ${snap.mode.simulated ? "banner-sim" : "banner-live"}` }, h("strong", {}, snap.mode.simulated ? "SIMULATED" : "LIVE"), " ", snap.mode.note),
       ...snap.warnings.map((w) => h("div", { class: "banner banner-warn" }, w)));
 
     const t = snap.totals, inflight = snap.replicas.reduce((a, r) => a + r.in_flight, 0);
     const tile = (label, value, cls = "") => h("div", { class: `stat ${cls}` }, h("div", { class: "stat-v" }, value), h("div", { class: "stat-l" }, label));
-    el("db-tiles").replaceChildren(h("div", { class: "stats big" },
+    fill(el("db-tiles"), h("div", { class: "stats big" },
       tile("received", fmtNum(t.received)), tile("completed", fmtNum(t.completed), "ok"), tile("failed", fmtNum(t.failed), t.failed ? "bad" : ""),
       tile("client disconnected", fmtNum(t.client_disconnected)), tile("in flight now", fmtNum(inflight)),
       tile("req/s", snap.throughput.requests_per_s.toFixed(2)), tile("tokens/s", snap.throughput.completion_tokens_per_s.toFixed(1)),
       tile("policy", snap.router.policy), tile("uptime", Math.round(snap.uptime_s) + " s")));
 
-    el("db-replicas").replaceChildren(...snap.replicas.map(replicaCard));
+    fill(el("db-replicas"), ...snap.replicas.map(replicaCard));
 
     const totalSel = snap.replicas.reduce((a, r) => a + r.stats.selected, 0);
     const max = Math.max(1, ...snap.replicas.map((r) => Math.max(r.stats.selected, r.stats.completed_ok)));
-    el("db-dist").replaceChildren(totalSel
+    fill(el("db-dist"), totalSel
       ? h("div", {}, ...snap.replicas.map((r) => h("div", { class: "distrow" },
           h("div", { class: "distlabel" }, replicaChip(r.replica_id, `R${r.replica_id}`)),
           h("div", { class: "bars" },
@@ -111,13 +111,13 @@ export function initDashboard(root, ctx) {
         h("p", { class: "muted small" }, "Cumulative since the router started. Pale = selected by the policy, solid = actually served."))
       : h("p", { class: "muted" }, "No requests routed yet."));
 
-    el("db-throughput").replaceChildren(
+    fill(el("db-throughput"), 
       h("div", {}, h("div", { class: "muted small" }, `requests/s (completed, last ${snap.throughput.window_s}s window): ${snap.throughput.requests_per_s.toFixed(2)}`), spark(store.history.rps, "var(--accent)")),
       h("div", {}, h("div", { class: "muted small" }, `completion tokens/s (engine-reported usage): ${snap.throughput.completion_tokens_per_s.toFixed(1)}`), spark(store.history.tps, "var(--ok)")),
       h("p", { class: "muted small" }, snap.throughput.note));
 
     const ps = snap.policy_state;
-    el("db-policy").replaceChildren(kv([
+    fill(el("db-policy"), kv([
       ["policy", ps.name], ["default SLA", fmtMs(snap.router.default_sla_ms)], ["model", snap.router.model || "n/a"], ["block size", snap.router.block_size ?? "n/a"],
       ["admission", snap.router.admission ? `${snap.router.admission.in_flight} in flight / max ${snap.router.admission.max_in_flight}` : "n/a"],
       ...(ps.prefix_index ? [["tokenizer", ps.tokenizer || "n/a"], ["index: distinct blocks", fmtNum(ps.prefix_index.distinct_blocks)], ["index cap per replica", fmtNum(ps.prefix_index.max_blocks_per_replica)],
@@ -133,7 +133,7 @@ export function initDashboard(root, ctx) {
       ["KV-cache usage", av.kv_cache_usage.available, av.kv_cache_usage.note + " · " + av.kv_cache_usage.source],
       ["TTFT", av.ttft.available, av.ttft.scope], ["ITL", av.itl.available, av.itl.scope], ["Token counts", av.token_counts.available, av.token_counts.scope],
       ["Engine prefix hit rate", av.engine_prefix_hit_rate.available, av.engine_prefix_hit_rate.source]];
-    el("db-avail").replaceChildren(h("table", { class: "grid small" }, h("tbody", {}, ...rows.map(([name, ok, why, partial]) => h("tr", {},
+    fill(el("db-avail"), h("table", { class: "grid small" }, h("tbody", {}, ...rows.map(([name, ok, why, partial]) => h("tr", {},
       h("th", { scope: "row" }, name), h("td", {}, h("span", { class: `badge badge-${ok ? (partial ? "warn" : "ok") : "bad"}` }, ok ? (partial ? "partial" : "measured") : "unavailable")), h("td", { class: "note" }, why))))));
   }
 
