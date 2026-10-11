@@ -59,8 +59,19 @@ class ScrapedMetrics:
     running: int = 0
     waiting: int = 0
     gpu_cache_usage_perc: float = 0.0
+    # True once a scrape actually contained the KV-cache usage gauge. Without
+    # this, "0.0 because the engine reported 0%" and "0.0 because the engine
+    # doesn't expose it" are indistinguishable.
+    gpu_cache_usage_seen: bool = False
     last_scraped_monotonic: float = 0.0
+    # True once the router has actually probed this replica's /health at least
+    # once, so "unhealthy" can be told apart from "not probed yet".
+    health_checked: bool = False
     healthy: bool = False
+    # Last answer from the replica sidecar's /sidecar/gpu (None = never polled).
+    # Either {"available": True, "gpus": [...]} or {"available": False, "error": why}.
+    gpu: dict | None = None
+    gpu_polled_monotonic: float = 0.0
     # Raw cumulative counters straight from vLLM's own Prometheus output
     # (vllm:prefix_cache_hits / vllm:prefix_cache_queries) -- vLLM's ground
     # truth for whether its prefix cache actually served a request,
@@ -187,13 +198,15 @@ class ReplicaState:
         self,
         running: int,
         waiting: int,
-        gpu_cache_usage_perc: float,
+        gpu_cache_usage_perc: float | None,
         prefix_cache_hits: float | None = None,
         prefix_cache_queries: float | None = None,
     ) -> None:
         self.metrics.running = running
         self.metrics.waiting = waiting
-        self.metrics.gpu_cache_usage_perc = gpu_cache_usage_perc
+        if gpu_cache_usage_perc is not None:
+            self.metrics.gpu_cache_usage_perc = gpu_cache_usage_perc
+            self.metrics.gpu_cache_usage_seen = True
         if prefix_cache_hits is not None:
             self.metrics.prefix_cache_hits = prefix_cache_hits
         if prefix_cache_queries is not None:

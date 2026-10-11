@@ -57,20 +57,35 @@ class Policy(Protocol):
 class RoundRobinPolicy:
     name = "round_robin"
 
+    # Every policy publishes *why* it chose, as plain data, in `last_decision`
+    # (read by the router's observability layer immediately after `select`
+    # returns, in the same synchronous step -- there is no `await` between the
+    # two, so concurrent requests cannot see each other's value). Only facts
+    # the policy actually computed are recorded; nothing is inferred later.
+    last_decision: dict | None = None
+
     def __init__(self):
         self._next_index = 0
 
     def select(self, session_id, sla_ms, replicas, messages=None) -> ReplicaState:
-        replica = replicas[self._next_index % len(replicas)]
+        slot = self._next_index % len(replicas)
+        replica = replicas[slot]
         self._next_index += 1
+        self.last_decision = {"path": "round_robin", "slot": slot, "rotation_size": len(replicas)}
         return replica
 
 
 class LeastConnectionsPolicy:
     name = "least_connections"
+    last_decision: dict | None = None
 
     def select(self, session_id, sla_ms, replicas, messages=None) -> ReplicaState:
-        return min(replicas, key=lambda r: (r.queue_depth(), r.replica_id))
+        chosen = min(replicas, key=lambda r: (r.queue_depth(), r.replica_id))
+        self.last_decision = {
+            "path": "least_connections",
+            "queue_depths": {str(r.replica_id): r.queue_depth() for r in replicas},
+        }
+        return chosen
 
 
 class SwiftServePolicy:
@@ -96,28 +111,53 @@ class SwiftServePolicy:
     """
 
     name = "swiftserve"
+    last_decision: dict | None = None  # see RoundRobinPolicy.last_decision
 
     def __init__(self, prefix_trie: PrefixCacheTrie | None = None):
         self._prefix_trie = prefix_trie if prefix_trie is not None else PrefixCacheTrie(ttl_s=600.0)
+
+    @property
+    def prefix_trie(self) -> PrefixCacheTrie:
+        """Read-only handle for observability (`/api/dashboard` reports its size)."""
+        return self._prefix_trie
 
     def select(
         self, session_id: str, sla_ms: float, replicas: list[ReplicaState], messages: list[dict] | None = None
     ) -> ReplicaState:
         messages = messages or []
+        # Facts gathered on the way to the decision, published as last_decision.
+        facts: dict = {"sla_ms": sla_ms}
         owner = next((r for r in replicas if r.has_warm_cache(session_id)), None)
 
-        if owner is not None and owner.estimate_latency_ms() <= sla_ms:
-            self._prefix_trie.record(messages, owner.replica_id)
-            return owner
+        if owner is not None:
+            owner_estimate_ms = owner.estimate_latency_ms()
+            facts["session_owner"] = {
+                "replica_id": owner.replica_id,
+                "estimated_latency_ms": round(owner_estimate_ms, 1),
+                "within_sla": owner_estimate_ms <= sla_ms,
+            }
+            if owner_estimate_ms <= sla_ms:
+                self._prefix_trie.record(messages, owner.replica_id)
+                self.last_decision = {"path": "session_affinity", **facts}
+                return owner
 
         candidates = [r for r in replicas if r is not owner] if owner is not None else replicas
         by_id = {r.replica_id: r for r in candidates}
 
         shared_replica_id, matched_depth = self._prefix_trie.longest_match(messages)
+        facts["trie"] = {
+            "matched_depth": matched_depth,
+            "matched_replica_id": shared_replica_id,
+            "min_depth_required": _MIN_SHARED_PREFIX_MESSAGES,
+        }
         if matched_depth >= _MIN_SHARED_PREFIX_MESSAGES and shared_replica_id in by_id:
             shared = by_id[shared_replica_id]
-            if shared.estimate_latency_ms() <= sla_ms:
+            shared_estimate_ms = shared.estimate_latency_ms()
+            facts["trie"]["estimated_latency_ms"] = round(shared_estimate_ms, 1)
+            facts["trie"]["within_sla"] = shared_estimate_ms <= sla_ms
+            if shared_estimate_ms <= sla_ms:
                 self._prefix_trie.record(messages, shared.replica_id)
+                self.last_decision = {"path": "prefix_trie", **facts}
                 return shared
 
         prefix_size_tokens = _estimate_prefix_tokens(messages)
@@ -130,6 +170,11 @@ class SwiftServePolicy:
             ),
         )
         self._prefix_trie.record(messages, chosen.replica_id)
+        facts["fallback"] = {
+            "estimated_prefix_tokens": prefix_size_tokens,
+            "queue_depths": {str(r.replica_id): r.queue_depth() for r in candidates},
+        }
+        self.last_decision = {"path": "least_loaded", **facts}
         return chosen
 
 
@@ -175,6 +220,7 @@ class PrefixAwarePolicy:
     """
 
     name = "prefix_aware"
+    last_decision: dict | None = None  # see RoundRobinPolicy.last_decision
 
     def __init__(
         self,
@@ -223,21 +269,43 @@ class PrefixAwarePolicy:
         ]
 
         chosen: ReplicaState | None = None
+        path = "no_eligible_match"
+        facts: dict = {
+            "total_blocks": total_blocks,
+            "block_size": self.index.block_size,
+            "matched_blocks": {str(rid): blocks for rid, blocks in matches.items()},
+            "eligible_blocks": {str(r.replica_id): blocks for r, blocks in eligible},
+            "thresholds": {"min_ratio": self.cache_threshold, "min_tokens": self.min_match_tokens},
+            "sla_ms": sla_ms,
+        }
         if eligible:
             # Longest match wins; among equal matches prefer the shallower
             # queue, so a replicated hot prefix spreads instead of pinning.
-            best, _blocks = max(eligible, key=lambda rm: (rm[1], -rm[0].queue_depth(), -rm[0].replica_id))
-            if best.estimate_latency_ms() <= sla_ms:
+            best, best_blocks = max(eligible, key=lambda rm: (rm[1], -rm[0].queue_depth(), -rm[0].replica_id))
+            best_estimate_ms = best.estimate_latency_ms()
+            facts["best"] = {
+                "replica_id": best.replica_id,
+                "matched_blocks": best_blocks,
+                "estimated_latency_ms": round(best_estimate_ms, 1),
+                "within_sla": best_estimate_ms <= sla_ms,
+            }
+            if best_estimate_ms <= sla_ms:
                 chosen = best
+                path = "prefix_match"
+            else:
+                path = "sla_veto"
 
         if chosen is None:
             chosen = min(
                 replicas, key=lambda r: (r.queue_depth(), r.estimate_latency_ms(), r.replica_id)
             )
+            facts["fallback_queue_depths"] = {str(r.replica_id): r.queue_depth() for r in replicas}
 
         predicted_cached_tokens = matches.get(chosen.replica_id, 0) * self.index.block_size
+        facts["predicted_cached_tokens"] = predicted_cached_tokens
         self.index.insert(chosen.replica_id, hashes)
         chosen.touch_session(session_id)
+        self.last_decision = {"path": path, **facts}
         return chosen, predicted_cached_tokens
 
     def select(

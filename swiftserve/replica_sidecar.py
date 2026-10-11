@@ -30,6 +30,7 @@ import random
 import shlex
 import signal
 import subprocess
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -47,6 +48,75 @@ _HOP_BY_HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "content-length", "content-encoding",
 }
+
+
+_GPU_QUERY = ["index", "name", "utilization.gpu", "memory.used", "memory.total", "temperature.gpu"]
+
+
+def parse_nvidia_smi_csv(text: str) -> list[dict]:
+    """Parse ``nvidia-smi --query-gpu=... --format=csv,noheader,nounits`` output.
+
+    One dict per GPU line. A field nvidia-smi reports as ``[N/A]`` (or anything
+    non-numeric where a number is expected) becomes ``None`` -- unknown, never 0."""
+
+    def num(v: str) -> float | None:
+        try:
+            return float(v)
+        except ValueError:
+            return None
+
+    gpus = []
+    for line in text.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != len(_GPU_QUERY):
+            continue
+        idx, name, util, used, total, temp = parts
+        gpus.append({
+            "index": int(idx) if idx.isdigit() else None,
+            "name": name,
+            "utilization_pct": num(util),
+            "memory_used_mib": num(used),
+            "memory_total_mib": num(total),
+            "temperature_c": num(temp),
+        })
+    return gpus
+
+
+_gpu_cache: dict = {"t": 0.0, "value": None}
+
+
+async def query_gpu(timeout_s: float = 3.0, max_age_s: float = 1.0) -> dict:
+    """Ask the node's own ``nvidia-smi`` about its GPU(s). Read-only, and
+    cached for ``max_age_s`` so a polling router cannot make this node spawn a
+    subprocess more than about once a second."""
+    now = time.monotonic()
+    if _gpu_cache["value"] is not None and now - _gpu_cache["t"] < max_age_s:
+        return _gpu_cache["value"]
+    result: dict
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi", f"--query-gpu={','.join(_GPU_QUERY)}", "--format=csv,noheader,nounits",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            proc.kill()
+            result = {"available": False, "error": f"nvidia-smi did not answer within {timeout_s}s", "source": "nvidia-smi"}
+        else:
+            if proc.returncode != 0:
+                result = {"available": False, "error": (err.decode(errors="replace").strip() or f"exit code {proc.returncode}")[:300],
+                          "source": "nvidia-smi"}
+            else:
+                gpus = parse_nvidia_smi_csv(out.decode(errors="replace"))
+                result = {"available": bool(gpus), "gpus": gpus, "source": "nvidia-smi",
+                          "error": None if gpus else "nvidia-smi returned no GPUs"}
+    except FileNotFoundError:
+        result = {"available": False, "error": "nvidia-smi not found on this node", "source": "nvidia-smi"}
+    except OSError as exc:
+        result = {"available": False, "error": f"could not run nvidia-smi: {exc}", "source": "nvidia-smi"}
+    _gpu_cache.update(t=time.monotonic(), value=result)
+    return result
 
 
 @dataclass
@@ -155,6 +225,13 @@ def create_app(
     def _require_admin(x_chaos_token: str | None) -> None:
         if admin_token and x_chaos_token != admin_token:
             raise HTTPException(status_code=403, detail="invalid or missing X-Chaos-Token")
+
+    @app.get("/sidecar/gpu")
+    async def sidecar_gpu():
+        """Read-only GPU facts straight from this node's nvidia-smi: the one
+        place the GPU behind a replica URL can be identified truthfully, since
+        the router itself only ever sees a URL."""
+        return await query_gpu()
 
     @app.get("/chaos/status")
     async def chaos_status():

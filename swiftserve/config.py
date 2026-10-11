@@ -22,6 +22,14 @@ def _parse_replica_urls(raw: str) -> list[str]:
     return urls
 
 
+def _parse_labels(raw: str) -> list[str]:
+    return [label.strip() for label in raw.split(",")] if raw.strip() else []
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     model_name: str = field(default_factory=lambda: os.environ.get("SWIFTSERVE_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
@@ -78,6 +86,30 @@ class Settings:
     # Absolute floor, OR'd with the ratio above: enough skipped prefill to
     # be worth distorting load-balancing for, regardless of prompt length.
     min_match_tokens: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_MIN_MATCH_TOKENS", "256")))
+
+    # -- observability / UI (all optional; defaults leave routing untouched) ---
+    # Operator-supplied display labels for replicas, comma-separated and
+    # positionally aligned with SWIFTSERVE_REPLICAS (e.g. "GPU 0,GPU 1,GPU 2"
+    # or "colab-a T4,colab-b T4"). The router cannot discover which physical
+    # GPU backs a URL, so without this the UI says "GPU mapping unavailable"
+    # instead of guessing one from the replica number.
+    replica_labels: list[str] = field(default_factory=lambda: _parse_labels(os.environ.get("SWIFTSERVE_REPLICA_LABELS", "")))
+    # Set by whoever launches the router against fake replicas (scripts/dev.py
+    # does) so the UI can label every number as simulated. The router has no
+    # way to detect that on its own.
+    simulated: bool = field(default_factory=lambda: _env_flag("SWIFTSERVE_SIMULATED"))
+    # Ring-buffer sizes for the structured event stream and the per-request
+    # records behind /api/events and /api/requests.
+    event_buffer_size: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_EVENT_BUFFER", "5000")))
+    record_buffer_size: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_RECORD_BUFFER", "2000")))
+
+    def __post_init__(self) -> None:
+        if self.replica_labels and len(self.replica_labels) != len(self.replica_urls):
+            raise ValueError(
+                f"SWIFTSERVE_REPLICA_LABELS has {len(self.replica_labels)} entries but "
+                f"SWIFTSERVE_REPLICAS has {len(self.replica_urls)}; they are matched by position, so the "
+                f"counts must be equal"
+            )
 
 
 settings = Settings()
