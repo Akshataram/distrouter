@@ -180,6 +180,13 @@ This confirms on real hardware that vLLM's prefix cache works, that `cached_toke
 
 Also note the capacity consequence: with a 6 000-token KV cache and ~1.6k-token prompts, only about 3 such requests fit concurrently even though `--max-num-seqs` is 32. For the router's `--max-num-seqs` (used for its latency model) a value near 4 is more honest than 32 for long-prompt tests; pick it deliberately and note it.
 
+**Observed through the router (policy `prefix_aware`, four Colab T4 nodes via Cloudflare tunnels, Playground, short ~25-token prompt):**
+- Dashboard: all 4 replicas healthy, circuit closed; each card showed "Tesla T4 (reported by the node)", VRAM 6,727 / 15,360 MiB, 45-69 °C, GPU utilization 0% while idle (from each node's own `nvidia-smi` via `/sidecar/gpu`).
+- Three sequential requests were all selected and served by replica R0 (colab-a); the `X-SwiftServe-Replica` header agreed with the router's event stream.
+- Request detail: decision `prefix_match` ("R0 holds 1/1 prompt blocks (16 tokens)"); router TTFT 752 ms (browser 782 ms); ITL = TPOT = 28.4 ms; completion tokens 24; **router-predicted reuse 16 tokens vs engine-reported `cached_tokens` 16 (prediction error 0)**.
+- The TTFT drop across those three requests (1993 → 972 → 752 ms) is **not** attributed to caching: with a 25-token prompt only one block exists to cache; first-request/tunnel warm-up is the likelier cause.
+- Still **not** observed: the effect of a long shared system prompt through the router, traffic spreading across R1-R3 under concurrency, and any comparison against the baseline policies.
+
 The node was cloned at commit `32d1160` (before this console existed), so it has no `/sidecar/gpu` yet; GPU rows will say "unavailable" until the node's repo is updated.
 
 ## 13. Limitations
