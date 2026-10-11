@@ -1,7 +1,5 @@
 import time
 
-import pytest
-
 from swiftserve.resilience import AdmissionController, CircuitBreaker, CircuitState
 
 

@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SwiftServe Playground</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232457d6'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #1b1f27; --muted: #5d6675; --line: #dfe3ea;
+    --accent: #2457d6; --accent-ink: #ffffff; --good: #137a43; --good-bg: #e3f4ea;
+    --warn: #8a5a00; --warn-bg: #fdf1d8; --bad: #b3261e; --bad-bg: #fbe4e2;
+    --g0: #2b6cb0; --g1: #b7791f; --g2: #2f855a; --g3: #805ad5; --g4: #c05621; --g5: #4a5568;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12151b; --card: #1a1f28; --ink: #e8ebf0; --muted: #98a2b3; --line: #2b3240;
+      --accent: #6c9bff; --accent-ink: #0c1220; --good: #5fd39a; --good-bg: #17342a;
+      --warn: #f0c36a; --warn-bg: #3a2f14; --bad: #ff8f87; --bad-bg: #3d1d1b;
+      --g0: #6cb0ff; --g1: #f0b95a; --g2: #6fd6a0; --g3: #b79bff; --g4: #ff9e6a; --g5: #a8b3c7;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--card); }
+  header h1 { font-size: 18px; margin: 0; }
+  .badge { font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px; letter-spacing: .02em; }
+  .badge.sim { background: var(--warn-bg); color: var(--warn); }
+  .badge.real { background: var(--good-bg); color: var(--good); }
+  .meta { color: var(--muted); font-size: 13px; }
+  .spacer { flex: 1; }
+  main { display: grid; grid-template-columns: minmax(300px, 420px) 1fr; gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  select, input[type=text], input[type=number], textarea {
+    width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--ink); font: inherit;
+  }
+  textarea { min-height: 120px; resize: vertical; font-family: var(--mono); font-size: 12px; line-height: 1.4; }
+  .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .seg { display: flex; flex-wrap: wrap; gap: 6px; }
+  .seg button { flex: 1 1 auto; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; font: inherit; font-size: 13px; }
+  .seg button[aria-pressed=true] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .chip { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+  .primary { width: 100%; margin-top: 14px; padding: 11px; border-radius: 10px; border: 0; background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 700; cursor: pointer; }
+  .primary[disabled] { opacity: .55; cursor: progress; }
+  .ghost { padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; font: inherit; font-size: 13px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--ink); margin-top: 10px; }
+  .check input { margin-top: 3px; }
+  #status-line { min-height: 20px; font-size: 13px; color: var(--muted); margin-top: 8px; }
+  #status-line.err { color: var(--bad); }
+  .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .gpus { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+  .gpu { border: 1px solid var(--line); border-radius: 10px; padding: 10px; border-left-width: 5px; }
+  .gpu h3 { margin: 0 0 4px; font-size: 14px; }
+  .gpu dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; font-size: 12px; }
+  .gpu dt { color: var(--muted); } .gpu dd { margin: 0; text-align: right; font-family: var(--mono); }
+  .gpu .seen { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); }
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.num { text-align: right; font-family: var(--mono); }
+  td.ans { max-width: 220px; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+  .gchip { display: inline-block; min-width: 52px; text-align: center; padding: 1px 8px; border-radius: 6px; font-size: 12px; font-weight: 700; color: #fff; }
+  .hit { color: var(--good); font-weight: 700; } .miss { color: var(--warn); font-weight: 700; }
+  .bar { display: inline-block; width: 60px; height: 8px; background: var(--line); border-radius: 4px; vertical-align: middle; margin-right: 6px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--good); }
+  tr.errrow td { color: var(--bad); }
+  .empty { color: var(--muted); padding: 14px 4px; font-size: 13px; }
+  .legend { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SwiftServe Playground</h1>
+  <span id="mode" class="badge">…</span>
+  <span class="meta" id="meta"></span>
+  <span class="spacer"></span>
+  <button class="ghost" id="reset" title="Restart every router (empty index) and clear replica caches">Reset routers</button>
+  <button class="ghost" id="clear" title="Clear the table below (does not touch the cluster)">Clear table</button>
+</header>
+
+<main>
+  <section class="card" aria-label="Compose a request">
+    <h2>1 · Compose a request</h2>
+
+    <label id="pol-label">Routing policy</label>
+    <div class="seg" id="policies" role="group" aria-labelledby="pol-label"></div>
+    <div class="hint" id="pol-hint"></div>
+
+    <label for="preset">Company (system prompt)</label>
+    <div class="row" style="grid-template-columns: 1fr 110px;">
+      <select id="preset"></select>
+      <input type="number" id="tokens" value="2000" min="0" max="6000" step="100" aria-label="Target system prompt tokens">
+    </div>
+    <textarea id="system" spellcheck="false" aria-label="System prompt"></textarea>
+    <div class="hint" id="sys-count"></div>
+
+    <label for="user">Question</label>
+    <input type="text" id="user" value="How do I get started?">
+    <div class="chips" id="questions"></div>
+
+    <div class="row">
+      <div><label for="maxtok">Max tokens</label><input type="number" id="maxtok" value="16" min="1" max="256"></div>
+      <div><label for="copies">Copies</label><input type="number" id="copies" value="1" min="1" max="200"></div>
+      <div><label for="conc">Concurrency</label><input type="number" id="conc" value="1" min="1" max="32"></div>
+    </div>
+    <label class="check"><input type="checkbox" id="isolate" checked>
+      <span>Isolate policies (adds a <code>[ns:policy]</code> marker at the front of the system prompt so one policy can't reuse blocks another warmed)</span></label>
+
+    <button class="primary" id="send">Send</button>
+    <div id="status-line" role="status"></div>
+    <div class="hint">To see a cache hit: send the same company twice with <b>concurrency 1</b>. The first request is a miss by definition; the second should land on the GPU that read it.</div>
+  </section>
+
+  <div class="stack">
+    <section class="card" aria-label="GPU replicas">
+      <h2>2 · The GPUs <span class="meta" id="gpu-for"></span></h2>
+      <div class="gpus" id="gpus"></div>
+      <div class="legend">Live from each router's <code>/status</code>. “Prompts seen” is what <em>this page</em> sent to that GPU through the policy being viewed.</div>
+    </section>
+
+    <section class="card" aria-label="Summary by policy">
+      <h2>3 · Summary by policy</h2>
+      <div class="tablewrap"><table id="summary"><thead><tr>
+        <th>Policy</th><th class="num">Requests</th><th class="num">TTFT avg</th><th class="num">Cache ratio</th><th class="num">Pred. error</th><th>GPUs used</th>
+      </tr></thead><tbody></tbody></table></div>
+    </section>
+
+    <section class="card" aria-label="Request log">
+      <h2>4 · Every request</h2>
+      <div class="tablewrap"><table id="log"><thead><tr>
+        <th>#</th><th>Policy</th><th>Company</th><th>GPU</th><th class="num">TTFT</th><th>Reused (engine)</th><th class="num">Predicted</th><th class="num">Error</th><th>Reply</th>
+      </tr></thead><tbody></tbody></table></div>
+      <div class="empty" id="empty">Nothing sent yet.</div>
+      <div class="legend"><b>TTFT</b> = time to first token. <b>Reused</b> = prompt tokens the engine says it did not have to recompute (<code>cached_tokens</code>). <b>Predicted</b> = what the router expected to be reused. <b>Error</b> = |predicted − reused| in tokens.</div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const GCOLORS = ["--g0", "--g1", "--g2", "--g3", "--g4", "--g5"];
+const ALL = "__all__";
+const state = { cfg: null, selected: null, rows: [], seq: 0, seen: {}, busy: false, presetName: {} };
+
+const HINTS = {
+  round_robin: "Takes turns across GPUs. Ignores cache and load.",
+  least_connections: "Picks the least busy GPU. Ignores what each GPU remembers.",
+  swiftserve: "Original rule: session stickiness + a message-level trie. Needs ≥2 shared messages, so a single shared system prompt never triggers it.",
+  prefix_aware: "Block-level index: sends the request to the GPU believed to hold the longest run of its 16-token blocks.",
+};
+
+const fmtMs = (v) => (v == null ? "–" : Math.round(v) + " ms");
+const pct = (v) => (v == null ? "–" : (v * 100).toFixed(0) + "%");
+const gcolor = (rid) => `var(${GCOLORS[Number(rid) % GCOLORS.length] || GCOLORS[5]})`;
+const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+
+function setStatus(msg, isErr) { const el = $("status-line"); el.textContent = msg || ""; el.className = isErr ? "err" : ""; }
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || body.detail || `HTTP ${res.status}`);
+  return body;
+}
+
+function renderPolicies() {
+  const wrap = $("policies"); wrap.textContent = "";
+  const options = [...state.cfg.policies, ALL];
+  for (const p of options) {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = p === ALL ? "All (compare)" : p;
+    b.setAttribute("aria-pressed", String(p === state.selected));
+    b.onclick = () => { state.selected = p; renderPolicies(); poll(); };
+    wrap.appendChild(b);
+  }
+  $("pol-hint").textContent = state.selected === ALL
+    ? "Sends the same request to every policy, one after another, each in its own isolated cache namespace."
+    : (HINTS[state.selected] || "");
+}
+
+function viewPolicy() { return state.selected === ALL ? (state.cfg.policies.includes("prefix_aware") ? "prefix_aware" : state.cfg.policies[0]) : state.selected; }
+
+function updateSysCount() {
+  const chars = $("system").value.length;
+  $("sys-count").textContent = `${chars.toLocaleString()} characters ≈ ${Math.round(chars / 4).toLocaleString()} tokens (rough; the engine reports the exact count per request)`;
+}
+
+async function loadPreset() {
+  try {
+    const id = $("preset").value, tokens = $("tokens").value || 0;
+    const data = await api(`/api/preset?id=${encodeURIComponent(id)}&tokens=${encodeURIComponent(tokens)}`);
+    $("system").value = data.system; updateSysCount();
+  } catch (e) { setStatus(e.message, true); }
+}
+
+async function init() {
+  state.cfg = await api("/api/config");
+  const mode = $("mode");
+  mode.textContent = state.cfg.simulated ? "SIMULATED · fake replicas" : "REAL · vLLM on GPUs";
+  mode.className = "badge " + (state.cfg.simulated ? "sim" : "real");
+  $("meta").textContent = `${state.cfg.replicas.length} replicas · model ${state.cfg.model} · tokenizer ${state.cfg.tokenizer} · block size ${state.cfg.block_size}`;
+  state.selected = state.cfg.policies.includes("prefix_aware") ? "prefix_aware" : state.cfg.policies[0];
+  for (const p of state.cfg.presets) {
+    state.presetName[p.id] = p.name;
+    const o = document.createElement("option"); o.value = p.id; o.textContent = p.name; $("preset").appendChild(o);
+  }
+  for (const q of state.cfg.questions) {
+    const c = document.createElement("button"); c.type = "button"; c.className = "chip"; c.textContent = q;
+    c.onclick = () => { $("user").value = q; }; $("questions").appendChild(c);
+  }
+  renderPolicies(); await loadPreset(); poll(); setInterval(poll, 2000);
+}
+
+// ---- sending ----------------------------------------------------------------
+
+async function sendOne(policy, label) {
+  const body = {
+    policy, system: $("system").value, user: $("user").value,
+    max_tokens: Number($("maxtok").value) || 16, isolate: $("isolate").checked,
+  };
+  const row = { n: ++state.seq, policy, label };
+  try {
+    const r = await api("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    Object.assign(row, r);
+    const key = policy + "|" + r.replica;
+    (state.seen[key] = state.seen[key] || new Set()).add(label);
+  } catch (e) { row.error = e.message; }
+  state.rows.unshift(row); renderRows();
+}
+
+async function send() {
+  if (state.busy) return;
+  if (!$("user").value.trim()) { setStatus("Type a question first.", true); return; }
+  const policies = state.selected === ALL ? state.cfg.policies : [state.selected];
+  const copies = Math.max(1, Number($("copies").value) || 1);
+  const conc = Math.max(1, Number($("conc").value) || 1);
+  const label = state.presetName[$("preset").value] || "custom";
+  const jobs = [];
+  for (const p of policies) for (let i = 0; i < copies; i++) jobs.push(p);
+  state.busy = true; $("send").disabled = true;
+  let done = 0, next = 0;
+  const worker = async () => {
+    while (next < jobs.length) {
+      const p = jobs[next++];
+      await sendOne(p, label);
+      setStatus(`Sent ${++done} of ${jobs.length} …`);
+    }
+  };
+  try { await Promise.all(Array.from({ length: Math.min(conc, jobs.length) }, worker)); setStatus(`Done: ${jobs.length} request${jobs.length > 1 ? "s" : ""}.`); }
+  finally { state.busy = false; $("send").disabled = false; poll(); }
+}
+
+// ---- rendering ----------------------------------------------------------------
+
+function td(text, cls) { const c = document.createElement("td"); if (cls) c.className = cls; c.textContent = text; return c; }
+
+function renderRows() {
+  const body = $("log").tBodies[0]; body.textContent = "";
+  $("empty").style.display = state.rows.length ? "none" : "block";
+  for (const r of state.rows.slice(0, 200)) {
+    const tr = document.createElement("tr");
+    if (r.error) {
+      tr.className = "errrow";
+      tr.append(td(r.n), td(r.policy), td(r.label), td("–"));
+      const e = td(r.error); e.colSpan = 5; tr.append(e); body.appendChild(tr); continue;
+    }
+    tr.append(td(r.n), td(r.policy), td(r.label));
+    const g = document.createElement("td"), chip = document.createElement("span");
+    chip.className = "gchip"; chip.style.background = gcolor(r.replica); chip.textContent = "GPU " + r.replica; g.appendChild(chip); tr.append(g);
+    tr.append(td(fmtMs(r.ttft_ms), "num"));
+    const reuse = document.createElement("td"), bar = document.createElement("span"), fill = document.createElement("i");
+    bar.className = "bar"; fill.style.width = Math.round((r.cache_ratio || 0) * 100) + "%"; bar.appendChild(fill);
+    const lbl = document.createElement("span"); lbl.className = r.cached_tokens > 0 ? "hit" : "miss";
+    lbl.textContent = `${r.cached_tokens}/${r.prompt_tokens}` + (r.cached_tokens > 0 ? " hit" : " miss");
+    reuse.append(bar, lbl); tr.append(reuse);
+    tr.append(td(r.predicted_cached_tokens, "num"), td(r.prediction_error_tokens, "num"));
+    const ans = td((r.content || "").replace(/\s+/g, " ").trim() || "(empty)", "ans"); ans.title = r.content || ""; tr.append(ans);
+    body.appendChild(tr);
+  }
+  renderSummary();
+}
+
+function renderSummary() {
+  const body = $("summary").tBodies[0]; body.textContent = "";
+  for (const p of state.cfg.policies) {
+    const rows = state.rows.filter((r) => r.policy === p && !r.error);
+    if (!rows.length) continue;
+    const ttft = mean(rows.map((r) => r.ttft_ms).filter((v) => v != null));
+    const prompt = rows.reduce((a, r) => a + r.prompt_tokens, 0), cached = rows.reduce((a, r) => a + r.cached_tokens, 0);
+    const err = mean(rows.map((r) => (r.prompt_tokens ? r.prediction_error_tokens / r.prompt_tokens : 0)));
+    const tr = document.createElement("tr");
+    tr.append(td(p), td(rows.length, "num"), td(fmtMs(ttft), "num"), td(pct(prompt ? cached / prompt : null), "num"), td(pct(err), "num"));
+    const used = document.createElement("td"), counts = {};
+    for (const r of rows) counts[r.replica] = (counts[r.replica] || 0) + 1;
+    for (const [rid, n] of Object.entries(counts).sort()) {
+      const chip = document.createElement("span"); chip.className = "gchip"; chip.style.background = gcolor(rid);
+      chip.style.marginRight = "4px"; chip.textContent = `${rid}×${n}`; used.appendChild(chip);
+    }
+    tr.append(used); body.appendChild(tr);
+  }
+}
+
+async function poll() {
+  let all; try { all = await api("/api/status"); } catch (e) { return; }
+  const p = viewPolicy(); $("gpu-for").textContent = "· viewing " + p;
+  const info = all[p]; const wrap = $("gpus"); wrap.textContent = "";
+  if (!info || info.error) { wrap.textContent = "Router not reachable: " + ((info && info.error) || "unknown"); return; }
+  const idxBlocks = (info.prefix_index && info.prefix_index.blocks_per_replica) || {};
+  for (const r of info.replicas) {
+    const box = document.createElement("div"); box.className = "gpu"; box.style.borderLeftColor = gcolor(r.replica_id);
+    const h = document.createElement("h3"); h.textContent = "GPU " + r.replica_id; box.appendChild(h);
+    const dl = document.createElement("dl");
+    const add = (k, v) => { const dt = document.createElement("dt"); dt.textContent = k; const dd = document.createElement("dd"); dd.textContent = v; dl.append(dt, dd); };
+    add("in flight", r.in_flight); add("avg latency", Math.round(r.ewma_latency_ms) + " ms"); add("circuit", r.circuit.state);
+    if (info.prefix_index) add("index blocks", idxBlocks[String(r.replica_id)] || 0);
+    add("served here", state.rows.filter((x) => x.policy === p && String(x.replica) === String(r.replica_id)).length);
+    box.appendChild(dl);
+    const seen = document.createElement("div"); seen.className = "seen";
+    for (const label of (state.seen[p + "|" + r.replica_id] || [])) { const t = document.createElement("span"); t.className = "tag"; t.textContent = label; seen.appendChild(t); }
+    box.appendChild(seen); wrap.appendChild(box);
+  }
+}
+
+$("send").onclick = send;
+$("preset").onchange = loadPreset;
+$("tokens").onchange = loadPreset;
+$("system").oninput = updateSysCount;
+$("user").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+$("clear").onclick = () => { state.rows = []; state.seen = {}; renderRows(); setStatus(""); poll(); };
+$("reset").onclick = async () => {
+  if (!confirm("Restart every router (empty index) and clear replica caches?")) return;
+  setStatus("Restarting routers …");
+  try { const r = await api("/api/reset", { method: "POST" }); state.rows = []; state.seen = {}; renderRows(); poll();
+        setStatus(r.replica_cache_reset_failed.length ? "Routers reset. Could not clear the cache on: " + r.replica_cache_reset_failed.join(", ") : "Routers and replica caches reset."); }
+  catch (e) { setStatus(e.message, true); }
+};
+
+init().catch((e) => setStatus("Could not load: " + e.message, true));
+</script>
+</body>
+</html>

@@ -78,8 +78,16 @@ This is a real, runnable system, not a paper simulation:
   `/v1/chat/completions` calls to whichever real vLLM replica it selects,
   tracks per-replica queue depth, and maintains the cache-affinity heatmap
   as soft state.
+- `swiftserve/prefix_trie.py` -- a cross-session prefix tree (Preble-style
+  scheduling) that routes a *different* session sharing a common prompt
+  prefix to whichever replica already served it, not just a session's own
+  repeat turns; see `ARCHITECTURE.md` for how this and the DistServe/
+  MoonCake/llm-d ideas map onto what's actually implemented here.
 - `swiftserve/resilience.py` -- per-replica circuit breaking and global
   admission control, wired into the routing and proxy path.
+- `swiftserve/request_context.py` -- a `contextvars`-based request
+  correlation ID (`X-Request-Id`), propagated through the router's and
+  sidecar's logs without threading it through every function signature.
 - `swiftserve/metrics.py` -- the router's own Prometheus instrumentation
   (`/metrics`), separate from the per-replica vLLM metrics it scrapes.
 - `swiftserve/replica_sidecar.py` -- runs next to real vLLM on each GPU
@@ -91,7 +99,10 @@ This is a real, runnable system, not a paper simulation:
   rerouted, and recovered (with MTTR).
 - `scripts/benchmark.py` -- multi-seed statistical benchmark: bootstrap
   confidence intervals and a permutation-test significance check between
-  policies, instead of one single-shot number.
+  policies, instead of one single-shot number. Also implements Goodput@N
+  (DistServe's metric): `goodput`/`goodput-compare` sweep open-loop
+  offered load to find the max RPS a policy sustains at a target SLA-
+  attainment rate.
 - `scripts/load_test.py` -- the original single-shot live load generator;
   kept for a quick one-off check.
 - `scripts/fake_vllm_stub.py` -- an honestly-labeled, minimal HTTP
@@ -112,7 +123,9 @@ This is a real, runnable system, not a paper simulation:
   vs. stood-in, and why).
 
 **SwiftServe needs no GPU to run** -- it's a thin CPU proxy, and `pytest -q`
-(47 tests) needs no GPU either. Actually serving Qwen requires real GPUs;
+(109 tests) needs no GPU either. `ruff check .` and `mypy swiftserve` are
+clean, and `.github/workflows/ci.yml` runs all three on every push/PR
+across Python 3.10-3.12. Actually serving Qwen requires real GPUs;
 `DEPLOYMENT.md` covers both the original single-box path and the real
 multi-node path via `notebooks/gpu_node.ipynb`.
 
@@ -121,6 +134,8 @@ multi-node path via `notebooks/gpu_node.ipynb`.
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
 pytest -q                      # unit + smoke + end-to-end chaos tests, no GPU required
+ruff check .                   # lint
+mypy swiftserve                # type-check
 
 # once you have real vLLM/Qwen replicas up (single-box: see DEPLOYMENT.md
 # Option A/B/C; multi-node: notebooks/gpu_node.ipynb per node):
@@ -129,6 +144,24 @@ uvicorn swiftserve.app:app --port 8000
 
 python scripts/load_test.py --router-url http://localhost:8000 --num-sessions 50 --turns 4
 ```
+
+## Live console (playground, load test, routing view, dashboard)
+
+With your GPU nodes up (e.g. four Colab T4s, each reached through a Cloudflare
+tunnel URL), one command starts the router and its web console:
+
+```bash
+python3 scripts/dev.py \
+  --replicas "https://a.trycloudflare.com,https://b.trycloudflare.com,https://c.trycloudflare.com,https://d.trycloudflare.com" \
+  --policy prefix_aware --model Qwen/Qwen2.5-3B-Instruct --tokenizer Qwen/Qwen2.5-3B-Instruct \
+  --max-num-seqs 4 --labels "colab-a T4,colab-b T4,colab-c T4,colab-d T4"
+# open http://127.0.0.1:8000/ui/
+```
+
+Real replicas are the default. `--simulate` (fake replicas, no GPU, everything
+labelled SIMULATED) exists only for developing the console itself. See
+`docs/COMPLETE_PROJECT_WALKTHROUGH.md` and `docs/PROJECT_INTERVIEW_PREPARATION.md`.
+`scripts/playground.py` is the older multi-policy comparison launcher and is unchanged.
 
 See `DEPLOYMENT.md` for the full guide -- single-box and real multi-node
 deployment, the observability stack, and running a chaos scenario -- and

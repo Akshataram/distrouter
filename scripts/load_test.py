@@ -9,80 +9,51 @@ header, when present), and per-replica distribution.
 Usage:
     python scripts/load_test.py --router-url http://localhost:8000 \\
         --num-sessions 50 --turns 4 --concurrency 10
+
+Thin wrapper: the actual session-running and workload-generation logic now
+lives in scripts/workloads.py (deterministic workload generators) and
+scripts/benchmark.py (_stream_chat_turn / run_session -- streaming SSE,
+same as `benchmark.py run`), so this script and benchmark.py no longer
+carry two copies of the same PROMPTS list and turn-runner. This stays the
+simple, single-shot tool; scripts/benchmark.py is the statistically-
+rigorous one (bootstrap CIs, permutation tests, multiple workload shapes).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import random
 import statistics
+import sys
 import time
 import uuid
+from pathlib import Path
 
 import httpx
 
-PROMPTS = [
-    "Summarize the plot of a story about a lighthouse keeper.",
-    "What are three ways to improve a Python function's performance?",
-    "Explain the difference between TCP and UDP in one paragraph.",
-    "Give me a recipe idea using chickpeas and spinach.",
-    "Write a short haiku about autumn rain.",
-]
+# Running this file directly (`python scripts/load_test.py`, as documented
+# above) only puts scripts/ itself on sys.path, not the repo root -- so
+# `from scripts.benchmark import ...` below would otherwise only work
+# under pytest (which already puts the repo root on sys.path). Inserting
+# the repo root explicitly makes both invocations work the same way.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts.benchmark import (  # noqa: E402
+    format_percentile,
+    run_session,
+)
 
 
-async def run_session(
-    client: httpx.AsyncClient,
-    router_url: str,
-    model: str,
-    session_id: str,
-    num_turns: int,
-    sla_ms: float,
-    max_tokens: int,
-    results: list[dict],
-):
-    messages = []
-    for turn in range(num_turns):
-        messages.append({"role": "user", "content": random.choice(PROMPTS)})
-        start = time.monotonic()
-        try:
-            resp = await client.post(
-                f"{router_url}/v1/chat/completions",
-                json={"model": model, "messages": messages, "max_tokens": max_tokens},
-                headers={"X-Session-Id": session_id, "X-SLA-Ms": str(sla_ms)},
-                timeout=120.0,
-            )
-            elapsed_ms = (time.monotonic() - start) * 1000.0
-            results.append(
-                {
-                    "session_id": session_id,
-                    "turn": turn,
-                    "latency_ms": elapsed_ms,
-                    "status": resp.status_code,
-                    "replica": resp.headers.get("x-swiftserve-replica"),
-                    "cache_hit": resp.headers.get("x-swiftserve-cache-hit"),
-                    "sla_ms": sla_ms,
-                    "sla_violated": elapsed_ms > sla_ms,
-                }
-            )
-            if resp.status_code == 200:
-                reply = resp.json()["choices"][0]["message"]["content"]
-                messages.append({"role": "assistant", "content": reply})
-        except httpx.HTTPError as exc:
-            results.append({"session_id": session_id, "turn": turn, "error": str(exc)})
-
-
-async def main_async(args):
+async def main_async(args: argparse.Namespace) -> None:
     results: list[dict] = []
     semaphore = asyncio.Semaphore(args.concurrency)
 
-    async def bounded_session(session_id: str):
-        async with semaphore:
-            async with httpx.AsyncClient() as client:
-                await run_session(
-                    client, args.router_url, args.model, session_id,
-                    args.turns, args.sla_ms, args.max_tokens, results,
-                )
+    async def bounded_session(session_id: str) -> None:
+        async with semaphore, httpx.AsyncClient() as client:
+            await run_session(
+                client, args.router_url, args.model, session_id,
+                args.turns, args.sla_ms, args.max_tokens, results,
+            )
 
     session_ids = [f"loadtest-{uuid.uuid4().hex[:8]}" for _ in range(args.num_sessions)]
     start = time.monotonic()
@@ -102,15 +73,22 @@ async def main_async(args):
     for r in ok:
         replica_counts[r["replica"]] = replica_counts.get(r["replica"], 0) + 1
 
-    quantiles = statistics.quantiles(latencies, n=100, method="inclusive")
     print(f"Requests: {len(ok)} ok, {len(errors)} errored | wall clock: {wall_s:.1f}s")
     print(f"Cache-hit rate (of requests that report it): {len(cache_hits)}/{len(ok)} = {len(cache_hits) / len(ok):.1%}")
     print(f"SLA violation rate: {len(sla_violations)}/{len(ok)} = {len(sla_violations) / len(ok):.1%}")
-    print(f"Latency ms: mean={statistics.fmean(latencies):.1f} p50={quantiles[49]:.1f} p95={quantiles[94]:.1f} p99={quantiles[98]:.1f}")
+    print(
+        f"Latency: mean={statistics.fmean(latencies):.1f}ms "
+        f"p50={format_percentile(latencies, 50)} p90={format_percentile(latencies, 90)} "
+        f"p95={format_percentile(latencies, 95)} p99={format_percentile(latencies, 99)}"
+    )
     print(f"Requests per replica: {replica_counts}")
+    print(
+        "(this is scripts/load_test.py -- a single-shot number that scheduling jitter can swing; "
+        "for anything you'd defend, use scripts/benchmark.py's multi-seed bootstrap CIs instead)"
+    )
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--router-url", default="http://localhost:8000")
     parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")

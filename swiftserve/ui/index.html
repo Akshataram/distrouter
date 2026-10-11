@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SwiftServe Console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232457d6'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <h1>SwiftServe Console</h1>
+  <span id="mode" class="badge badge-info">connecting…</span>
+  <span id="meta" class="muted small"></span>
+  <span class="spacer"></span>
+  <span id="conn" class="badge badge-info" role="status">events: connecting…</span>
+</header>
+
+<div id="auth-box" class="banner banner-warn" hidden>
+  <strong>This router requires an API token.</strong>
+  <input id="auth-token" type="password" placeholder="SWIFTSERVE_API_TOKEN" autocomplete="off" aria-label="API token">
+  <button id="auth-save" class="primary">Connect</button>
+  <span class="muted small">Kept in memory only; never stored by this page.</span>
+</div>
+
+<nav id="tabs" role="tablist" aria-label="Console sections"></nav>
+
+<main>
+  <div id="panel-playground" role="tabpanel" aria-labelledby="tab-playground" hidden></div>
+  <div id="panel-loadtest" role="tabpanel" aria-labelledby="tab-loadtest" hidden></div>
+  <div id="panel-routing" role="tabpanel" aria-labelledby="tab-routing" hidden></div>
+  <div id="panel-dashboard" role="tabpanel" aria-labelledby="tab-dashboard" hidden></div>
+</main>
+
+<noscript>This console needs JavaScript.</noscript>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

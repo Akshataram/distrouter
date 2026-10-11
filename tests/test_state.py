@@ -74,3 +74,49 @@ def test_configured_floor_can_exceed_observed_concurrency():
     r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, assumed_max_batch_size=16)
     r.record_scrape(running=3, waiting=0, gpu_cache_usage_perc=0.1)
     assert r.effective_batch_capacity() == 16
+
+
+def test_unobserved_occupancy_bucket_falls_back_to_global_ewma():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, seed_latency_ms=100.0, assumed_max_batch_size=9)
+    r.record_completion_latency(300.0, occupancy_at_dispatch=0, alpha=0.5)  # only the low bucket gets real data
+    assert r.ewma_latency_ms == 200.0
+    r.in_flight = 7  # lands in an unobserved high bucket (7/9 -> top third)
+    assert r.estimate_latency_ms() == 200.0  # falls back to the global EWMA, not the low bucket's 300.0
+
+
+def test_busy_occupancy_bucket_reflects_slower_observed_service_time():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, seed_latency_ms=100.0, assumed_max_batch_size=9)
+    r.record_completion_latency(100.0, occupancy_at_dispatch=0)  # low bucket: fast, uncontended
+    r.record_completion_latency(500.0, occupancy_at_dispatch=8)  # high bucket: slow, GPU contended
+
+    r.in_flight = 0
+    assert r.estimate_latency_ms() == 100.0  # idle replica: low-bucket estimate
+    r.in_flight = 8
+    assert r.estimate_latency_ms() == 500.0  # nearly-full batch: high-bucket estimate, not the flat average
+
+
+def test_occupancy_bucket_first_sample_seeds_directly_not_blended():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, seed_latency_ms=1000.0, assumed_max_batch_size=4)
+    r.record_completion_latency(50.0, occupancy_at_dispatch=0, alpha=0.2)
+    r.in_flight = 0
+    # first sample for this bucket replaces the generic seed outright rather
+    # than blending 20% of it against the 1000ms default seed.
+    assert r.estimate_latency_ms() == 50.0
+
+
+def test_queueing_formula_uses_busiest_bucket_service_time():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, seed_latency_ms=100.0, assumed_max_batch_size=4)
+    r.record_completion_latency(200.0, occupancy_at_dispatch=3)  # busiest bucket calibrated to 200ms
+    r.in_flight = 4  # depth == capacity: queueing branch
+    assert r.estimate_latency_ms() == 200.0 * 5 / 4
+
+
+def test_cold_start_penalty_is_zero_by_default():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600)
+    assert r.estimate_cold_start_penalty_ms(prefix_size_tokens=10_000) == 0.0
+
+
+def test_cold_start_penalty_scales_with_prefix_size_when_configured():
+    r = ReplicaState(replica_id=0, base_url="http://x", cache_ttl_s=600, cold_start_ms_per_token=2.0)
+    assert r.estimate_cold_start_penalty_ms(prefix_size_tokens=100) == 200.0
+    assert r.estimate_cold_start_penalty_ms(prefix_size_tokens=0) == 0.0

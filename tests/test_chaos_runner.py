@@ -64,7 +64,11 @@ def real_two_node_cluster():
     sidecar_ports: list[int] = []
 
     def spawn(cmd: list[str], name: str, env_overrides: dict | None = None) -> subprocess.Popen:
-        log_file = open(log_dir / f"{name}.log", "w")
+        # Deliberately not a `with` block: this file must stay open for the
+        # subprocess's whole lifetime (it's Popen's stdout target), well
+        # past this function returning -- it's closed in the fixture's own
+        # teardown below, alongside the process itself.
+        log_file = open(log_dir / f"{name}.log", "w")  # noqa: SIM115
         popen = subprocess.Popen(
             cmd,
             cwd=REPO_ROOT,

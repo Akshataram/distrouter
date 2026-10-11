@@ -23,10 +23,22 @@ for i in "${!PORTS[@]}"; do
   port="${PORTS[$i]}"
   gpu="${GPUS[$i]}"
   echo "Launching replica $i: model=$MODEL gpu=$gpu port=$port"
+  # --enable-prompt-tokens-details: makes vLLM report usage.prompt_tokens_details
+  #   .cached_tokens in each response -- the real (not predicted) cache-hit
+  #   signal scripts/benchmark.py's true_cache_ratio depends on.
+  # --block-size 16 / --max-num-seqs 32 / --max-model-len 8192 / --dtype half:
+  #   T4-friendly defaults (see notebooks/gpu_node.ipynb and DEPLOYMENT.md)
+  #   that also happen to be sane on a bigger GPU box -- SWIFTSERVE_MAX_NUM_SEQS
+  #   on the router side should match --max-num-seqs if you change it here.
   CUDA_VISIBLE_DEVICES="$gpu" nohup python3 -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
     --port "$port" \
     --enable-prefix-caching \
+    --enable-prompt-tokens-details \
+    --block-size 16 \
+    --max-num-seqs 32 \
+    --max-model-len 8192 \
+    --dtype half \
     --gpu-memory-utilization 0.90 \
     > "$LOG_DIR/replica-$i.log" 2>&1 &
   echo "  pid=$! log=$LOG_DIR/replica-$i.log"

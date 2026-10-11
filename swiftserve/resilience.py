@@ -61,6 +61,15 @@ class CircuitBreaker:
     def is_open(self) -> bool:
         return self.state is CircuitState.OPEN
 
+    @property
+    def half_open_in_flight(self) -> int:
+        """How many half-open probe requests are currently outstanding for
+        this replica. Used to spread probe traffic fairly across several
+        simultaneously-recovering replicas (see app.py's probe selection)
+        instead of always favoring whichever replica happens to sort
+        first -- irrelevant (always 0) outside HALF_OPEN."""
+        return self._half_open_in_flight
+
     def has_probe_capacity(self) -> bool:
         """Whether another half-open trial request may be dispatched right
         now. Irrelevant (always True) outside HALF_OPEN."""
