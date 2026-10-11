@@ -156,19 +156,19 @@ def test_main_rejects_a_bad_url_and_a_labels_mismatch(capsys, tmp_path):
 
 def test_main_reports_missing_packages(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(dev, "missing_modules", lambda *a, **k: ["fastapi"])
-    assert dev.main(["--log-dir", str(tmp_path)]) == 2 and "pip install -r requirements.txt" in capsys.readouterr().err
+    assert dev.main(["--replicas", "https://a.example", "--log-dir", str(tmp_path)]) == 2 and "pip install -r requirements.txt" in capsys.readouterr().err
 
 
 def test_main_refuses_a_busy_port(capsys, tmp_path):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         s.listen()
-        assert dev.main(["--port", str(s.getsockname()[1]), "--log-dir", str(tmp_path)]) == 2
+        assert dev.main(["--replicas", "https://a.example", "--port", str(s.getsockname()[1]), "--log-dir", str(tmp_path)]) == 2
     assert "already in use" in capsys.readouterr().err
 
 
 def test_main_check_only_in_simulated_mode_starts_nothing(capsys, tmp_path):
-    assert dev.main(["--check-only", "--log-dir", str(tmp_path)]) == 0
+    assert dev.main(["--simulate", "--check-only", "--log-dir", str(tmp_path)]) == 0
     assert "SIMULATED" in capsys.readouterr().out
 
 
@@ -181,3 +181,9 @@ def test_main_exits_nonzero_when_no_replica_answers_unless_allowed(monkeypatch, 
 
 def test_namespace_type_is_what_build_parser_returns():
     assert isinstance(dev.build_parser().parse_args([]), argparse.Namespace)
+
+
+def test_real_replicas_are_required_unless_simulate_is_explicit(capsys, tmp_path):
+    assert dev.main(["--log-dir", str(tmp_path)]) == 2
+    assert "no replicas given" in capsys.readouterr().err
+    assert dev.main(["--simulate", "--replicas", "https://a.example", "--log-dir", str(tmp_path)]) == 2

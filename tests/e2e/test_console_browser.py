@@ -46,7 +46,7 @@ def free_port() -> int:
 def stack(tmp_path_factory):
     port = free_port()
     logs = tmp_path_factory.mktemp("e2e_logs")
-    proc = subprocess.Popen([sys.executable, str(REPO / "scripts" / "dev.py"), "--policy", "prefix_aware", "--port", str(port),
+    proc = subprocess.Popen([sys.executable, str(REPO / "scripts" / "dev.py"), "--simulate", "--policy", "prefix_aware", "--port", str(port),
                              "--log-dir", str(logs), "--num-replicas", "3"], cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     base = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + 90

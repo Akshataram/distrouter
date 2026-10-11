@@ -5,10 +5,10 @@
     python scripts/dev.py \\
         --replicas https://a.trycloudflare.com,https://b.trycloudflare.com,https://c.trycloudflare.com,https://d.trycloudflare.com \\
         --policy prefix_aware --model Qwen/Qwen2.5-3B-Instruct --tokenizer Qwen/Qwen2.5-3B-Instruct \\
-        --max-num-seqs 32 --labels "colab-a T4,colab-b T4,colab-c T4,colab-d T4"
+        --max-num-seqs 4 --labels "colab-a T4,colab-b T4,colab-c T4,colab-d T4"
 
-    # No GPUs / no tunnels: start fake replicas too and label everything SIMULATED.
-    python scripts/dev.py --policy prefix_aware
+    # Only for developing the console without GPUs: explicit opt-in, labelled SIMULATED.
+    python scripts/dev.py --simulate --policy prefix_aware
 
 then open http://127.0.0.1:8000/ui/.
 
@@ -21,8 +21,9 @@ What this script does, and does not do
 - It starts ONE router process (`uvicorn swiftserve.app:app`) with the same
   environment variables the router already understands. It does not change
   routing behaviour: unset options keep the router's own defaults.
-- With no replicas given it also starts fake replicas (`scripts/fake_vllm_stub.py`)
-  and sets SWIFTSERVE_SIMULATED=1 so the console labels all numbers as simulated.
+- REAL replicas are the default and `--replicas` is required. Only with the
+  explicit `--simulate` flag does it start fake replicas (`scripts/fake_vllm_stub.py`)
+  and set SWIFTSERVE_SIMULATED=1 so the console labels all numbers as simulated.
 - It NEVER starts vLLM, downloads a model, or touches a GPU. Real replicas are
   whatever you already have running (see notebooks/gpu_node.ipynb).
 - Ctrl+C / SIGTERM stops the router gracefully (in-flight requests get
@@ -62,7 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--replicas", default=os.environ.get("SWIFTSERVE_REPLICAS", ""),
                    help="comma-separated replica base URLs (e.g. your Cloudflare tunnel URLs). "
-                        "Default: $SWIFTSERVE_REPLICAS. If neither is set, fake replicas are started (SIMULATED).")
+                        "Default: $SWIFTSERVE_REPLICAS. Required unless --simulate is given.")
+    p.add_argument("--simulate", action="store_true", help="development only: start FAKE replicas (no model, no GPU) and label everything SIMULATED")
     p.add_argument("--policy", default=os.environ.get("SWIFTSERVE_POLICY", "swiftserve"),
                    help="routing policy: round_robin, least_connections, swiftserve, prefix_aware "
                         "(default: $SWIFTSERVE_POLICY, else the router's own default 'swiftserve')")
@@ -87,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check-only", action="store_true", help="run the startup validation and exit")
     p.add_argument("--open", action="store_true", help="open the console in a browser once the router is up")
     p.add_argument("--log-dir", default="dev_logs")
-    sim = p.add_argument_group("simulated mode only (no --replicas)")
+    sim = p.add_argument_group("simulated mode only (--simulate)")
     sim.add_argument("--num-replicas", type=int, default=4)
     sim.add_argument("--kv-blocks", type=int, default=375)
     sim.add_argument("--prefill-ms-per-token", type=float, default=0.2)
@@ -319,7 +321,14 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    simulated = not replica_urls
+    simulated = bool(args.simulate)
+    if simulated and replica_urls:
+        print("ERROR: --simulate starts its own fake replicas; do not combine it with --replicas.", file=sys.stderr)
+        return 2
+    if not simulated and not replica_urls:
+        print("ERROR: no replicas given. Pass --replicas with your Cloudflare tunnel URLs (or set SWIFTSERVE_REPLICAS).\n"
+              "  (For console development without GPUs only: --simulate.)", file=sys.stderr)
+        return 2
 
     if not args.check_only and port_in_use(args.host, args.port):
         print(f"ERROR: {args.host}:{args.port} is already in use. Stop whatever is listening there or pass --port.", file=sys.stderr)
@@ -340,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         model = args.model
         warnings: list[str] = []
         if simulated:
-            print(f"No replicas given: starting {args.num_replicas} FAKE replicas (no model, no GPU). Everything will be labelled SIMULATED.")
+            print(f"--simulate: starting {args.num_replicas} FAKE replicas (no model, no GPU). Everything will be labelled SIMULATED.")
             if args.check_only:
                 print("check-only: nothing started.")
                 return 0

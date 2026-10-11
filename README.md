@@ -145,6 +145,24 @@ uvicorn swiftserve.app:app --port 8000
 python scripts/load_test.py --router-url http://localhost:8000 --num-sessions 50 --turns 4
 ```
 
+## Live console (playground, load test, routing view, dashboard)
+
+With your GPU nodes up (e.g. four Colab T4s, each reached through a Cloudflare
+tunnel URL), one command starts the router and its web console:
+
+```bash
+python3 scripts/dev.py \
+  --replicas "https://a.trycloudflare.com,https://b.trycloudflare.com,https://c.trycloudflare.com,https://d.trycloudflare.com" \
+  --policy prefix_aware --model Qwen/Qwen2.5-3B-Instruct --tokenizer Qwen/Qwen2.5-3B-Instruct \
+  --max-num-seqs 4 --labels "colab-a T4,colab-b T4,colab-c T4,colab-d T4"
+# open http://127.0.0.1:8000/ui/
+```
+
+Real replicas are the default. `--simulate` (fake replicas, no GPU, everything
+labelled SIMULATED) exists only for developing the console itself. See
+`docs/COMPLETE_PROJECT_WALKTHROUGH.md` and `docs/PROJECT_INTERVIEW_PREPARATION.md`.
+`scripts/playground.py` is the older multi-policy comparison launcher and is unchanged.
+
 See `DEPLOYMENT.md` for the full guide -- single-box and real multi-node
 deployment, the observability stack, and running a chaos scenario -- and
 `ARCHITECTURE.md` for the system design and known limitations.
