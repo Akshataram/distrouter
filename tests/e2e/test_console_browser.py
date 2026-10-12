@@ -93,8 +93,10 @@ def test_playground_request_is_attributed_by_the_router(page):
     pg.fill("#pg-max", "6")
     pg.click("#pg-send")
     pg.wait_for_function("document.querySelector('#pg-detail').textContent.includes('completed')", timeout=15000)
-    detail = pg.inner_text("#pg-detail")
-    assert "Selected by policy" in detail and "Served by" in detail and "TTFT (time to first token)" in detail
+    detail = pg.inner_text("#pg-detail")                                   # the short summary people actually read
+    assert "Served by" in detail and "Why" in detail and "TTFT" in detail and "Reused from cache" in detail
+    full = pg.text_content("#pg-detail")                                   # the collapsed "All details" section is still there
+    assert "Selected by policy" in full and "Dispatched to" in full
     assert re.search(r"R\d", detail) and "prefix" in detail.lower()
     assert "tok0" in pg.inner_text("#pg-output")
     pg.click("#pg-send")                                                   # same prompt again: should now hit the cache
@@ -140,7 +142,7 @@ def test_routing_view_and_dashboard_render_real_data(page):
     assert pg.locator("#rt-decisions tbody tr").count() >= 1
     pg.click("#tab-dashboard")
     pg.wait_for_function("document.querySelectorAll('.card.replica').length === 3", timeout=10000)
-    text = pg.inner_text("#db-avail")
+    text = pg.text_content("#db-avail")                                   # inside a collapsed section
     assert "GPU utilization / VRAM" in text and "unavailable" in text         # fake replicas have no sidecar: reported, not invented
     assert "SIMULATED" in pg.inner_text("#db-banner")
     assert all(not p.startswith("pageerror") for p in problems)

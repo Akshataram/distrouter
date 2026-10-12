@@ -21,7 +21,7 @@ function stateChip(state) {
   return h("span", { class: `badge badge-${cls}` }, state);
 }
 
-export function renderDetail(container, req, { replicaLabel = (rid) => `R${rid}` } = {}) {
+function renderFull(container, req, { replicaLabel = (rid) => `R${rid}` } = {}) {
   container.textContent = "";
   if (!req) { container.append(h("p", { class: "muted" }, "Select a request to see exactly what happened to it.")); return; }
   const s = req.server, c = req.client;
@@ -99,4 +99,35 @@ export function renderDetail(container, req, { replicaLabel = (rid) => `R${rid}`
   if (err) container.append(h("div", { class: "errbox" }, h("strong", {}, s.error_stage ? `Failed (${s.error_stage}): ` : "Error: "), String(err),
     s.http_status ? h("span", { class: "muted" }, `  · HTTP ${s.http_status}`) : null));
   else if (s.http_status && s.http_status >= 400) container.append(h("div", { class: "errbox" }, `Upstream answered HTTP ${s.http_status}.`));
+}
+
+// What most people need: who served it, why, how fast, and whether the cache helped.
+// Everything else (selected vs dispatched, candidate table, timing sources) is one click away.
+export function renderDetail(container, req, opts = {}) {
+  const replicaLabel = opts.replicaLabel || ((rid) => `R${rid}`);
+  container.textContent = "";
+  if (!req) { container.append(h("p", { class: "muted" }, "Send a request or select one to see what happened to it.")); return; }
+  const s = req.server, c = req.client;
+  const noStream = s.stream === false;
+  const err = (c && c.error) || s.error;
+  const cached = s.cached_tokens, predicted = s.predicted;
+  const reuse = s.prompt_tokens === null ? "n/a" : cached === null ? "not reported by the engine"
+    : `${fmtNum(cached)} of ${fmtNum(s.prompt_tokens)} prompt tokens`;
+  const rows = [
+    row("Served by", s.served !== null ? replicaChip(s.served, replicaLabel(s.served)) : (TERMINAL.has(s.state) ? "none" : "in progress")),
+    row("Why", s.path ? describeDecision(s) : "n/a"),
+    row("TTFT", noStream ? "n/a (non-streaming)" : fmtMs(s.ttft_ms, 0)),
+    row("ITL (mean)", noStream ? "n/a (non-streaming)" : fmtMs(s.itl_mean_ms, 1)),
+    row("Total", fmtMs(s.total_ms, 0)),
+    row("Reused from cache", reuse),
+    predicted === null || predicted === undefined ? null : row("Router predicted", `${fmtNum(predicted)} tokens`)];
+  container.append(h("div", { class: "detail-head" }, stateChip(c && c.aborted ? "aborted by browser" : s.state),
+    s.retries.length ? h("span", { class: "muted small" }, `${s.retries.length} retried`) : null),
+    h("table", { class: "kv" }, h("tbody", {}, ...rows)));
+  if (err) container.append(h("div", { class: "errbox" }, h("strong", {}, s.error_stage ? `Failed (${s.error_stage}): ` : "Error: "), String(err)));
+  const more = h("details", { class: "more" }, h("summary", {}, "All details"));
+  const inner = h("div", {});
+  more.append(inner);
+  container.append(more);
+  renderFull(inner, req, opts);
 }

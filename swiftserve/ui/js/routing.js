@@ -47,10 +47,11 @@ export function initRouting(root, ctx) {
     h("section", { class: "card" },
       h("div", { class: "card-head" }, h("h2", {}, "Live request flow"), h("span", { id: "rt-legend", class: "muted small" })),
       h("div", { id: "rt-diagram", class: "diagram" }),
-      h("p", { class: "muted small" }, "Each dot is a real request. It moves only when the router emits the corresponding event. Edge thickness is each replica's share of all routing decisions since the router started; the number inside a replica box is how many requests are dispatched to it right now.")),
-    h("section", { class: "card" }, h("h2", {}, "Timeline of recent requests"), h("div", { id: "rt-timeline", class: "timeline" })),
-    h("section", { class: "card" }, h("h2", {}, "Routing decisions"), h("div", { id: "rt-decisions", class: "tablewrap" })),
-    h("section", { class: "card" }, h("h2", {}, "Replica health changes"), h("div", { id: "rt-health" })));
+      h("p", { class: "muted small" }, "Each dot is a real request, moved by the router's own events. The number in a replica box is how many requests are running there now.")),
+    h("section", { class: "card" }, h("h2", {}, "Recent routing decisions"), h("div", { id: "rt-decisions", class: "tablewrap" })),
+    h("details", { class: "card more" }, h("summary", {}, "Timeline and health changes"),
+      h("h2", {}, "Timeline of recent requests"), h("div", { id: "rt-timeline", class: "timeline" }),
+      h("h2", {}, "Replica health changes"), h("div", { id: "rt-health" })));
 
   const el = (id) => root.querySelector("#" + id);
 
@@ -201,7 +202,7 @@ export function initRouting(root, ctx) {
       const reqs = store.all().filter((q) => store.activeReplica(q) === b.rid).slice(-14);
       reqs.forEach((q, i) => b.dots.append(svgEl("circle", { cx: b.x + 14 + (i % 14) * 13, cy: b.y + b.h - 12, r: 4.5, fill: `hsl(${hue(q.id)} 80% 55%)` })));
     }
-    el("rt-legend").textContent = snap.mode.simulated ? "SIMULATED replicas" : "live replicas";
+    el("rt-legend").textContent = snap.mode.simulated ? "SIMULATED replicas" : "";
   }
 
   function updateTimeline() {
