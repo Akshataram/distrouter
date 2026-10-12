@@ -39,6 +39,9 @@ def test_the_ui_contains_no_baked_in_credentials_or_external_hosts():
 def test_javascript_syntax_and_store_unit_tests():
     for f in JS:
         subprocess.run(["node", "--check", str(f)], check=True)
+    for name in ("store.test.mjs", "compare.test.mjs"):
+        out = subprocess.run(["node", str(Path(__file__).parent / "ui" / name)], capture_output=True, text=True)
+        assert out.returncode == 0, f"{name}: {out.stdout}\n{out.stderr}"
     out = subprocess.run(["node", str(Path(__file__).parent / "ui" / "store.test.mjs")], capture_output=True, text=True)
     assert out.returncode == 0, out.stdout + out.stderr
     assert "tests passed" in out.stdout

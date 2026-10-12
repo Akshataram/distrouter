@@ -136,6 +136,10 @@ def build_router_env(args: argparse.Namespace, replica_urls: list[str], model: s
         env["SWIFTSERVE_MIN_MATCH_TOKENS"] = str(args.min_match_tokens)
     if args.labels:
         env["SWIFTSERVE_REPLICA_LABELS"] = args.labels
+    if getattr(args, "host", "127.0.0.1") in ("127.0.0.1", "localhost", "::1"):
+        # Only on a loopback bind: lets the console's Compare tab switch policies. Anyone who can
+        # reach a router that is exposed on a network should not be able to change its routing.
+        env["SWIFTSERVE_ALLOW_POLICY_SWITCH"] = "1"
     if simulated:
         env["SWIFTSERVE_SIMULATED"] = "1"
         env.setdefault("SWIFTSERVE_SCRAPE_INTERVAL_S", "1")

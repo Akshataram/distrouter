@@ -149,6 +149,25 @@ Open `http://127.0.0.1:8000/ui/`. Notes:
 - The nodes' ADMIN_TOKEN is only for chaos endpoints, not routing.
 - `--simulate` exists for console development only and labels everything SIMULATED.
 
+### Comparing the four policies in the console (Compare tab)
+
+`POST /api/policy {"name": ...}` replaces the router's policy with a fresh instance (empty prefix index or trie). It is
+disabled unless `SWIFTSERVE_ALLOW_POLICY_SWITCH=1` (set by `scripts/dev.py` on a loopback bind), returns 409 while requests
+are in flight, and only builds one of the existing policies. The Compare tab (`ui/js/compare.js`, pure logic in
+`compare_logic.js`) uses it to run, for each policy in turn:
+
+1. the **same seeded request sequence** (tenant and question drawn from a fixed PRNG) over N tenants, each with its own
+   ~1,500-token system prompt;
+2. a **separate namespace per policy** (`[ns:<run>-<policy>]` at the very front of every system prompt, which changes every
+   chained block hash), so no policy reuses blocks another policy warmed on the replicas;
+3. a summary computed from the router's own measurements: TTFT median and 95th percentile, cache reuse (engine-reported cached
+   tokens over prompt tokens), ITL, and load balance (busiest replica over the average).
+
+Why the workload is built this way: with more tenants than one replica can cache (about 6,000 tokens of KV cache per node here),
+a policy that spreads every tenant across every replica makes the caches evict each other, whereas a policy that keeps a tenant on
+the replica that already holds it can keep its blocks resident. Whether `prefix_aware` actually wins on your cluster is what the
+table measures; it is not assumed. Policies run sequentially, so this is a controlled demonstration, not a publishable benchmark.
+
 ## 11. Debugging guide
 
 | Symptom | Likely cause | Where to look |

@@ -98,6 +98,10 @@ class Settings:
     # does) so the UI can label every number as simulated. The router has no
     # way to detect that on its own.
     simulated: bool = field(default_factory=lambda: _env_flag("SWIFTSERVE_SIMULATED"))
+    # Lets POST /api/policy swap the routing policy while the router runs (the console's
+    # Compare tab uses it). Off by default: changing routing from the API is an operator
+    # action, so only a launcher that binds to localhost (scripts/dev.py) turns it on.
+    allow_policy_switch: bool = field(default_factory=lambda: _env_flag("SWIFTSERVE_ALLOW_POLICY_SWITCH"))
     # Ring-buffer sizes for the structured event stream and the per-request
     # records behind /api/events and /api/requests.
     event_buffer_size: int = field(default_factory=lambda: int(os.environ.get("SWIFTSERVE_EVENT_BUFFER", "5000")))

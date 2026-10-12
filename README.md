@@ -158,6 +158,11 @@ python3 scripts/dev.py \
 # open http://127.0.0.1:8000/ui/
 ```
 
+The **Compare** tab runs the same multi-tenant workload (several different long system prompts shared
+by many requests) through all four policies one after another, each in its own prompt namespace, and
+shows TTFT, cache reuse and load balance side by side. Switching policy while the router runs is off by
+default (`SWIFTSERVE_ALLOW_POLICY_SWITCH`); `scripts/dev.py` enables it only for a loopback bind.
+
 Real replicas are the default. `--simulate` (fake replicas, no GPU, everything
 labelled SIMULATED) exists only for developing the console itself. See
 `docs/COMPLETE_PROJECT_WALKTHROUGH.md` and `docs/PROJECT_INTERVIEW_PREPARATION.md`.

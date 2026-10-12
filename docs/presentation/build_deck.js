@@ -390,7 +390,7 @@ if (fs.existsSync(RESULTS_PATH)) {
       ["1  Cluster", "Four T4 nodes, same model and vLLM settings, tunnels reachable", "Hardware and engine are identical for every policy"],
       ["2  Workload", "6 long system prompts (about 1,500 tokens) shared by 60 sessions, concurrency 8", "More shared prefixes than one node can cache, so placement matters"],
       ["3  Isolation", "Each policy gets its own prompt namespace: a marker at the front changes every block hash", "No policy inherits another policy's warm cache"],
-      ["4  Run", "One command runs round_robin, least_connections, swiftserve and prefix_aware in turn", "The same requests go through every policy"],
+      ["4  Run", "The console's Compare tab (or scripts/demo.py) runs round_robin, least_connections, swiftserve and prefix_aware in turn", "The same requests go through every policy"],
       ["5  Repeat", "Run again with another seed and the policy order reversed", "Shows the ranking is not an ordering or noise effect"],
       ["6  Read", "TTFT median and 95th percentile, cache reuse, goodput, spread across replicas", "TTFT shows the prefill saving; spread shows load balance"],
     ];
@@ -433,16 +433,16 @@ if (fs.existsSync(RESULTS_PATH)) {
   {
     const s = addSlide("Evidence");
     title(s, "Live demonstration");
-    [["Dashboard", "four GPUs with memory and temperature reported by each node"], ["Playground", "one request twice: cold, then with the prefix cached"], ["Load test", "sixty concurrent requests spread across the replicas"]].forEach(([h, d], i) => {
-      const x = 0.5 + i * 3.1;
-      card(s, x, 1.25, 2.8, 1.45, `Demo step ${i + 1}`);
-      s.addShape(pres.shapes.OVAL, { x: x + 0.15, y: 1.37, w: 0.4, h: 0.4, fill: { color: C.accent1 }, line: { color: C.accent1, width: 0 }, objectName: `Demo step ${i + 1} number` });
-      text(s, String(i + 1), { x: x + 0.15, y: 1.37, w: 0.4, h: 0.4, fontSize: 14, bold: true, color: C.background1, align: "center", valign: "middle" });
-      text(s, h, { x: x + 0.7, y: 1.37, w: 2.0, h: 0.4, fontSize: 16, bold: true, valign: "middle" });
-      text(s, d, { x: x + 0.15, y: 1.88, w: 2.5, h: 0.75, fontSize: 14, color: C.text2 });
+    [["Dashboard", "four GPUs with memory and temperature reported by each node"], ["Playground", "one request twice: cold, then with the prefix cached"], ["Compare", "the same multi-tenant workload through all four policies"], ["Live routing", "requests spreading across the replicas as they run"]].forEach(([h, d], i) => {
+      const x = 0.5 + i * 2.28;
+      card(s, x, 1.25, 2.1, 1.6, `Demo step ${i + 1}`);
+      s.addShape(pres.shapes.OVAL, { x: x + 0.12, y: 1.37, w: 0.4, h: 0.4, fill: { color: C.accent1 }, line: { color: C.accent1, width: 0 }, objectName: `Demo step ${i + 1} number` });
+      text(s, String(i + 1), { x: x + 0.12, y: 1.37, w: 0.4, h: 0.4, fontSize: 14, bold: true, color: C.background1, align: "center", valign: "middle" });
+      text(s, h, { x: x + 0.6, y: 1.37, w: 1.45, h: 0.4, fontSize: 15, bold: true, valign: "middle" });
+      text(s, d, { x: x + 0.12, y: 1.87, w: 1.9, h: 0.95, fontSize: 13, color: C.text2 });
     });
-    imageFit(s, path.join(HERE, "assets/dashboard_gpus.png"), 0.5, 3.0, 9, 2.0, "Dashboard screenshot");
-    s.addNotes("Run the demonstration in this order. Start on the dashboard to show the real GPUs and their memory and temperature. Then use the playground to send the same long system prompt twice and point at the cached token count and the time to first token. Finish with the load test and the live routing view to show concurrent requests being spread across replicas.");
+    imageFit(s, path.join(HERE, "assets/dashboard_gpus.png"), 0.5, 3.1, 9, 2.0, "Dashboard screenshot");
+    s.addNotes("Run the demonstration in this order. Start on the dashboard to show the real GPUs and their memory and temperature. Then use the playground to send the same long system prompt twice and point at the cached token count and the time to first token. Open the Compare tab and run all four policies on the same workload; the table shows the difference side by side. Keep the live routing view open while it runs to show requests spreading across replicas.");
   }
 
   // ============ 17. Limits and next steps ============

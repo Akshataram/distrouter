@@ -149,3 +149,11 @@ export async function chat({ requestId, model, messages, params = {}, stream = t
   out.tDone = performance.now();
   return out;
 }
+
+export async function postJSON(path, body) {
+  const res = await fetch(path, { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(body) });
+  let payload = null;
+  try { payload = await res.json(); } catch { /* not JSON */ }
+  if (!res.ok) throw new ApiError(res.status, (payload && (payload.detail || payload.error)) || `HTTP ${res.status}`);
+  return payload;
+}

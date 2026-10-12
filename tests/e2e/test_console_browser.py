@@ -146,3 +146,29 @@ def test_routing_view_and_dashboard_render_real_data(page):
     assert "GPU utilization / VRAM" in text and "unavailable" in text         # fake replicas have no sidecar: reported, not invented
     assert "SIMULATED" in pg.inner_text("#db-banner")
     assert all(not p.startswith("pageerror") for p in problems)
+
+
+def test_compare_tab_runs_every_policy_on_the_same_requests_and_restores_the_policy(page, stack):
+    """SIMULATED replicas: this checks the Compare mechanics (same workload per policy, router-measured
+    table, original policy restored), not anything about real GPU performance."""
+    pg, problems = page
+    start_policy = httpx.get(f"{stack}/api/dashboard").json()["router"]["policy"]
+    pg.click("#tab-compare")
+    assert pg.locator("#cp-warn .banner").count() == 0, "dev.py should enable policy switching"
+    pg.fill("#cp-n", "12")
+    pg.fill("#cp-c", "4")
+    pg.fill("#cp-t", "3")
+    pg.fill("#cp-tok", "500")
+    pg.fill("#cp-max", "4")
+    pg.click("#cp-start")
+    pg.wait_for_function("/^(Finished|Comparison failed)/.test(document.querySelector('#cp-status').textContent)", timeout=120000)
+    assert pg.inner_text("#cp-status") == "Finished."
+    header = pg.inner_text("#cp-result thead")
+    assert all(p in header for p in ("round_robin", "least_connections", "swiftserve", "prefix_aware"))
+    assert pg.locator("#cp-result tbody tr").count() >= 5
+    assert "Completed / failed" in pg.inner_text("#cp-result") and "12 / 0" in pg.inner_text("#cp-result")
+    dist = pg.inner_text("#cp-dist")
+    assert "round_robin" in dist and "prefix_aware" in dist
+    pg.wait_for_function(f"document.querySelector('#meta').textContent.includes('policy {start_policy}')", timeout=10000)
+    assert httpx.get(f"{stack}/api/dashboard").json()["router"]["policy"] == start_policy
+    assert all(not p.startswith("pageerror") for p in problems)
