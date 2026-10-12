@@ -205,6 +205,18 @@ Also note the capacity consequence: with a 6 000-token KV cache and ~1.6k-token 
 - Request detail: decision `prefix_match` ("R0 holds 1/1 prompt blocks (16 tokens)"); router TTFT 752 ms (browser 782 ms); ITL = TPOT = 28.4 ms; completion tokens 24; **router-predicted reuse 16 tokens vs engine-reported `cached_tokens` 16 (prediction error 0)**.
 - The TTFT drop across those three requests (1993 → 972 → 752 ms) is **not** attributed to caching: with a 25-token prompt only one block exists to cache; first-request/tunnel warm-up is the likelier cause.
 - **Load test, 60 requests, concurrency 8, `prefix_aware`, one identical 40-token prompt (no long shared system prompt), streaming, `max_tokens` 24:** 60/60 succeeded, 0 failed/aborted, 25.9 s elapsed (2.3 req/s). Router-reported distribution: R0 18, R1 12, R2 22, R3 8 (selected = served for every request, 60 total). TTFT p50 374 ms / p95 4944 ms; total p50 1074 ms / p95 5714 ms; ITL mean 34.2 ms (28.4 ms for the single unloaded request); 1,400 completion tokens, 54 tok/s engine-reported. The rows inspected (#49-#60) each show prompt 40 / completion ~24 / cached 32 (two full 16-token blocks). Caveat: with a 40-token prompt there is almost nothing to cache, so this shows the router spreading real load across all four GPUs correctly, **not** a cache speed-up and not a comparison with any baseline policy. Why traffic spread under `prefix_aware` (load/SLA fallback vs. other cause) was not yet inspected per request; the p95 TTFT tail was not yet traced to specific requests.
+- **Compare tab, real run on four Colab T4 nodes (one run, seed 1, 60 requests per policy, 6 tenants with ~1,500-token system prompts, concurrency 8, each policy in its own prompt namespace, policies run one after another; values as displayed):**
+
+  | | round_robin | least_connections | swiftserve | prefix_aware |
+  |---|---|---|---|---|
+  | TTFT median | 1033 ms | 1063 ms | 537 ms | **464 ms** |
+  | TTFT 95th percentile | 1887 ms | 1921 ms | **1690 ms** | 2671 ms |
+  | Prompt reused from cache | 55% | 48% | 69% | **87%** |
+  | Load balance (busiest ÷ average) | **1.00** | 1.53 | 1.33 | 1.47 |
+  | ITL mean | 41.0 ms | 37.1 ms | 53.7 ms | 43.3 ms |
+  | Requests per replica R0/R1/R2/R3 | 15/15/15/15 | 23/12/16/9 | 12/13/15/20 | 22/12/19/7 |
+
+  All 240 requests completed. `prefix_aware` had the lowest median TTFT (about 2.2-2.3x lower than the two load-based baselines) and the highest cache reuse; 87% is close to the ceiling for this workload (each tenant's prompt must miss once, about 90% with 6 tenants over 60 requests; this ceiling is a calculation, not a measurement). **Its 95th-percentile TTFT was the worst of the four**; it also placed 22 requests on one replica and 7 on another, which is consistent with queueing on the busy replica but has not been confirmed per request. `swiftserve` was a close second on median and cache reuse; why was not investigated. The run is a single seed in a fixed policy order on shared Colab GPUs, so it does not yet establish that `prefix_aware` is better overall; the next check is a repeat with another seed and the order reversed, and the per-request export (Compare tab, "Export JSON") to trace the tail.
 - Still **not** observed: the effect of a long shared system prompt through the router, traffic spreading across R1-R3 under concurrency, and any comparison against the baseline policies.
 
 The node was cloned at commit `32d1160` (before this console existed), so it has no `/sidecar/gpu` yet; GPU rows will say "unavailable" until the node's repo is updated.

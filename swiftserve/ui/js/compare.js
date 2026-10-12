@@ -10,7 +10,7 @@ const LABEL = { round_robin: "round_robin", least_connections: "least_connection
 
 export function initCompare(root, ctx) {
   const { store } = ctx;
-  const run = { running: false, stop: null, results: {}, order: [], done: 0, total: 0, current: null, config: null };
+  const run = { running: false, stop: null, results: {}, rows: {}, order: [], done: 0, total: 0, current: null, config: null };
 
   root.append(h("div", { class: "split" },
     h("section", { class: "card" },
@@ -93,7 +93,11 @@ export function initCompare(root, ctx) {
     await Promise.all([...inflight]);
     if (stop.aborted) return;
     await sleep(900);                                   // let the router's final events arrive
-    run.results[policy] = summarize(requestsOf(key));
+    const reqs = requestsOf(key);
+    run.results[policy] = summarize(reqs);
+    // one row per request, so a slow tail can be traced to the replica and routing path that caused it
+    run.rows[policy] = reqs.map((r) => ({ request: r.label, state: r.server.state, selected: r.server.selected, served: r.server.served, path: r.server.path,
+      ttft_ms: r.server.ttft_ms, total_ms: r.server.total_ms, prompt_tokens: r.server.prompt_tokens, cached_tokens: r.server.cached_tokens, predicted_cached_tokens: r.server.predicted }));
     run.done++;
     run.current = null;
     render();
@@ -109,7 +113,7 @@ export function initCompare(root, ctx) {
     const original = store.snapshot && store.snapshot.router.policy;
     const stop = { aborted: false, signal: null };
     const ctl = new AbortController(); stop.signal = ctl.signal;
-    Object.assign(run, { running: true, stop: () => { stop.aborted = true; ctl.abort(); }, results: {}, order, done: 0, total: order.length, config: cfg, current: null });
+    Object.assign(run, { running: true, stop: () => { stop.aborted = true; ctl.abort(); }, results: {}, rows: {}, order, done: 0, total: order.length, config: cfg, current: null });
     el("cp-stop").disabled = false; syncMode();
     const runId = uid("c").slice(0, 10);
     try {
@@ -176,7 +180,7 @@ export function initCompare(root, ctx) {
   }
 
   function exportJSON() {
-    const blob = new Blob([JSON.stringify({ config: run.config, order: run.order, results: run.results }, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify({ config: run.config, order: run.order, results: run.results, requests: run.rows }, null, 2)], { type: "application/json" });
     const a = h("a", { href: URL.createObjectURL(blob), download: "policy-comparison.json" });
     document.body.append(a); a.click(); a.remove();
   }

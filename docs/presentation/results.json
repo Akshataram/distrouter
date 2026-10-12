@@ -1,0 +1,57 @@
+{
+  "simulated": false,
+  "replicas": 4,
+  "config": {
+    "n": 60,
+    "tenants": 6,
+    "tokens": 1500,
+    "conc": 8,
+    "maxTokens": 16,
+    "seed": 1
+  },
+  "order": [
+    "round_robin",
+    "least_connections",
+    "swiftserve",
+    "prefix_aware"
+  ],
+  "results": {
+    "round_robin": {
+      "ttft_p50": 1033,
+      "ttft_p95": 1887,
+      "cache_reuse": 0.55,
+      "spread": 1.0,
+      "itl_mean": 41.0,
+      "completed": 60,
+      "failed": 0
+    },
+    "least_connections": {
+      "ttft_p50": 1063,
+      "ttft_p95": 1921,
+      "cache_reuse": 0.48,
+      "spread": 1.53,
+      "itl_mean": 37.1,
+      "completed": 60,
+      "failed": 0
+    },
+    "swiftserve": {
+      "ttft_p50": 537,
+      "ttft_p95": 1690,
+      "cache_reuse": 0.69,
+      "spread": 1.33,
+      "itl_mean": 53.7,
+      "completed": 60,
+      "failed": 0
+    },
+    "prefix_aware": {
+      "ttft_p50": 464,
+      "ttft_p95": 2671,
+      "cache_reuse": 0.87,
+      "spread": 1.47,
+      "itl_mean": 43.3,
+      "completed": 60,
+      "failed": 0
+    }
+  },
+  "source": "values read from the Compare tab screenshot of a real run on four Colab T4 nodes (rounded as displayed); per-replica counts R0-R3: round_robin 15/15/15/15, least_connections 23/12/16/9, swiftserve 12/13/15/20, prefix_aware 22/12/19/7"
+}

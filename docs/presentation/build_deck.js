@@ -401,7 +401,11 @@ if (fs.existsSync(RESULTS_PATH)) {
   }
 
   // ============ 15. Comparison results (only with real measurements) ============
-  const pol = (RESULTS && RESULTS.policies) || {};
+  // Accepts scripts/demo.py --json-out ("policies": true_cache_ratio, replica_spread, goodput) or the
+// console's Compare tab "Export JSON" ("results": cache_reuse, spread).
+const rawPol = (RESULTS && (RESULTS.policies || RESULTS.results)) || {};
+const pol = Object.fromEntries(Object.entries(rawPol).map(([k, v]) => [k, { ...v, true_cache_ratio: v.true_cache_ratio ?? v.cache_reuse ?? null, replica_spread: v.replica_spread ?? v.spread ?? null, goodput: v.goodput ?? null }]));
+const hasGoodput = Object.values(pol).some((v) => v.goodput !== null);
   const names = ["round_robin", "least_connections", "swiftserve", "prefix_aware"].filter((n) => pol[n]);
   if (names.length >= 2) {
     const s = addSlide("Evidence");
@@ -418,15 +422,19 @@ if (fs.existsSync(RESULTS_PATH)) {
     const pct = (x) => (x === null || x === undefined ? "n/a" : (x * 100).toFixed(0) + " %");
     const head = (t) => ({ text: t, options: { bold: true, color: C.background1, fill: { color: C.text1 }, fontSize: 12, fontFace: THEME.bodyFontFace } });
     const cell = (t, i, o = {}) => ({ text: String(t), options: { fontSize: 12, fontFace: THEME.bodyFontFace, color: C.text1, fill: { color: i % 2 ? C.background1 : C.background2 }, ...o } });
-    s.addTable([[head("Policy"), head("Cache reuse"), head("Goodput"), head("Max : mean load")],
-      ...names.map((n, i) => [cell(n, i, { bold: true }), cell(pct(pol[n].true_cache_ratio), i), cell(pct(pol[n].goodput), i), cell(pol[n].replica_spread === null ? "n/a" : pol[n].replica_spread.toFixed(2), i)])],
-      { x: 5.7, y: 1.3, w: 3.8, colW: [1.6, 0.75, 0.65, 0.8], border: { type: "solid", pt: 0.5, color: C.accent4 }, margin: [0.05, 0.06, 0.05, 0.06], objectName: "Comparison table" });
+    const spreadTxt = (n) => (pol[n].replica_spread === null ? "n/a" : pol[n].replica_spread.toFixed(2));
+    s.addTable([[head("Policy"), head("Cache reuse"), ...(hasGoodput ? [head("Goodput")] : []), head("Max : mean load")],
+      ...names.map((n, i) => [cell(n, i, { bold: true }), cell(pct(pol[n].true_cache_ratio), i), ...(hasGoodput ? [cell(pct(pol[n].goodput), i)] : []), cell(spreadTxt(n), i)])],
+      { x: 5.7, y: 1.3, w: 3.8, colW: hasGoodput ? [1.6, 0.75, 0.65, 0.8] : [1.8, 1.0, 1.0], border: { type: "solid", pt: 0.5, color: C.accent4 }, margin: [0.05, 0.06, 0.05, 0.06], objectName: "Comparison table" });
     const ok = names.filter((n) => pol[n].ttft_p50);
     const best = ok.reduce((a, b) => (pol[a].ttft_p50 <= pol[b].ttft_p50 ? a : b));
     const worst = ok.filter((n) => n !== best).reduce((a, b) => (pol[a].ttft_p50 >= pol[b].ttft_p50 ? a : b));
-    const w = RESULTS.workload || {};
-    text(s, `${best} has ${(pol[worst].ttft_p50 / pol[best].ttft_p50).toFixed(1)}x lower median TTFT than ${worst}. Workload: ${w.num_apps} shared system prompts of about ${w.system_prompt_tokens} tokens, ${w.sessions} sessions, concurrency ${w.concurrency}, seed ${w.seed}, ${RESULTS.replicas} replicas.`, { x: 0.5, y: 4.55, w: 9, h: 0.7, fontSize: 13, color: C.text2 });
-    s.addNotes("All policies ran the same workload on the same replicas, one after another, each in its own prompt namespace so that none benefited from a cache warmed by an earlier run. Read time to first token first, because that is where prefill savings show up. Cache reuse is the share of prompt tokens the engines reported as cached. Goodput is the share of requests that met both the time-to-first-token and per-token targets. Max-to-mean load shows how evenly requests spread: 1.0 is perfectly even, higher means one replica took more than its share. The policies ran sequentially, so treat this as a controlled demonstration; repeating it with another seed and the order reversed checks that the ranking holds.");
+    const w = RESULTS.workload || RESULTS.config || {};
+    const tenants = w.num_apps ?? w.tenants, sysTok = w.system_prompt_tokens ?? w.tokens, reqs = w.sessions ?? w.n, conc = w.concurrency ?? w.conc;
+    const bestP95 = ok.filter((n) => pol[n].ttft_p95).reduce((a, b) => (pol[a].ttft_p95 <= pol[b].ttft_p95 ? a : b));
+    const tail = bestP95 === best ? "" : ` Its 95th percentile was ${Math.round(pol[best].ttft_p95)} ms, against ${Math.round(pol[bestP95].ttft_p95)} ms for ${bestP95}.`;
+    text(s, `${best} had the lowest median TTFT, ${(pol[worst].ttft_p50 / pol[best].ttft_p50).toFixed(1)}x lower than ${worst}.${tail} Single run: ${reqs} requests per policy, ${tenants} tenants with system prompts of about ${sysTok} tokens, concurrency ${conc}, ${RESULTS.replicas || 4} replicas, policies run one after another.`, { x: 0.5, y: 4.55, w: 9, h: 0.7, fontSize: 13, color: C.text2 });
+    s.addNotes("All policies ran the same workload on the same replicas, one after another, each in its own prompt namespace so that none benefited from a cache warmed by an earlier run. Read time to first token first, because that is where prefill savings show up. Cache reuse is the share of prompt tokens the engines reported as cached. Goodput is the share of requests that met both the time-to-first-token and per-token targets. Max-to-mean load shows how evenly requests spread: 1.0 is perfectly even, higher means one replica took more than its share. Compare the median and the 95th percentile separately: a policy can have the best median and a worse tail, because concentrating requests on the replicas that hold a cache can also concentrate queueing. The policies ran one after another in a single run, so this is a controlled demonstration; repeating it with another seed and the order reversed checks that the ranking holds.");
   }
 
   // ============ 16. Demo ============
