@@ -125,6 +125,27 @@ if (RUNS.some((r) => r.simulated) && !process.env.ALLOW_SIMULATED) {
     s.addNotes("This project is a request router that sits in front of several GPU servers running the same language model. When a prompt shares its beginning with an earlier prompt, the router sends it to the GPU that already processed that beginning, so the work is not repeated, unless that GPU is too busy. The highlighted tile represents the one GPU that holds the cached prefix.");
   }
 
+  // ============ 1b. Problem statement ============
+  {
+    const s = addSlide("Context");
+    title(s, "Problem statement");
+    text(s, "With several GPU replicas, each keeps its own prefix cache, but standard routing ignores it. Requests that share a long prompt prefix often reach a replica that must recompute it, which raises time to first token.", { x: 0.5, y: 1.25, w: 9, h: 1.3, fontFace: THEME.headFontFace, fontSize: 20 });
+    const cards = [
+      [fa.FaComments, "Context", "Chat services reuse the same long system prompts across many users and serve them from several replicas of one model."],
+      [fa.FaExclamationTriangle, "Problem", "Round robin and least connections ignore cache contents. With small caches, replicas also evict each other's prefixes."],
+      [fa.FaBullseye, "Goal", "Route each request to the replica most likely to hold its prefix without overloading it, and measure the effect against the baselines."],
+    ];
+    for (let i = 0; i < cards.length; i++) {
+      const x = 0.5 + i * 3.1;
+      card(s, x, 2.7, 2.8, 2.0, `Problem card ${i + 1}`);
+      await iconCircle(s, cards[i][0], x + 0.2, 2.85, 0.5, i === 1 ? HEX.accent5 : HEX.accent1, `Problem ${i + 1}`);
+      text(s, cards[i][1], { x: x + 0.85, y: 2.85, w: 1.8, h: 0.5, fontSize: 18, bold: true, valign: "middle" });
+      text(s, cards[i][2], { x: x + 0.2, y: 3.5, w: 2.45, h: 1.3, fontSize: 14, color: C.text2 });
+    }
+    text(s, "Measured by: median and 95th-percentile time to first token, cache reuse and load balance, on four real GPUs.", { x: 0.5, y: 4.85, w: 8.4, h: 0.3, fontSize: 13, color: C.text2 });
+    s.addNotes("State the problem before the mechanism. Language-model services often put the same long system prompt in front of many users' questions, and they run several identical replicas of the model. vLLM can skip the work of reading a prompt prefix it has already processed, but each replica only knows its own cache. Standard policies such as round robin and least connections do not look at the cache at all, and when the caches are small the replicas evict each other's prefixes. The goal of this project is a router that sends each request to the replica most likely to hold its prefix without overloading it, and an honest measurement of whether that lowers time to first token compared with the baselines.");
+  }
+
   // ============ 2. Problem ============
   {
     const s = addSlide("Context");
