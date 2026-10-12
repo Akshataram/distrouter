@@ -36,6 +36,7 @@ const HEX = THEME.colors;
 const pres = new pptxgen();
 pres.layout = "LAYOUT_16x9"; // 10 x 5.625 in
 pres.theme = { headFontFace: THEME.headFontFace, bodyFontFace: THEME.bodyFontFace };
+pres.author = " ";
 pres.title = "Cache-Aware Request Routing for LLM Replicas";
 pres.subject = "Routing requests across GPU replicas to reuse the prefix cache";
 const C = pres.SchemeColor;
