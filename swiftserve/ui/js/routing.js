@@ -46,8 +46,7 @@ export function initRouting(root, ctx) {
   root.append(
     h("section", { class: "card" },
       h("div", { class: "card-head" }, h("h2", {}, "Live request flow"), h("span", { id: "rt-legend", class: "muted small" })),
-      h("div", { id: "rt-diagram", class: "diagram" }),
-      h("p", { class: "muted small" }, "Each dot is a real request, moved by the router's own events. The number in a replica box is how many requests are running there now.")),
+      h("div", { id: "rt-diagram", class: "diagram" })),
     h("section", { class: "card" }, h("h2", {}, "Recent routing decisions"), h("div", { id: "rt-decisions", class: "tablewrap" })),
     h("details", { class: "card more" }, h("summary", {}, "Timeline and health changes"),
       h("h2", {}, "Timeline of recent requests"), h("div", { id: "rt-timeline", class: "timeline" }),
@@ -208,7 +207,7 @@ export function initRouting(root, ctx) {
   function updateTimeline() {
     const reqs = store.all().filter((r) => r.server.t_received).slice(-26);
     const box = el("rt-timeline");
-    if (!reqs.length) { fill(box, h("p", { class: "muted" }, "Requests appear here as the router handles them.")); return; }
+    if (!reqs.length) { fill(box, h("p", { class: "muted" }, "No requests yet.")); return; }
     const start = Math.min(...reqs.map((r) => r.server.t_received * 1000));
     const end = Math.max(...reqs.map((r) => r.server.t_received * 1000 + (r.server.at.finished ?? r.server.at.first_token ?? r.server.at.dispatch ?? 0) + 30));
     const span = Math.max(end - start, 200);
@@ -242,7 +241,7 @@ export function initRouting(root, ctx) {
               h("td", {}, s.served !== null ? replicaChip(s.served, replicaLabel(s.served)) : (s.state === "completed" ? "n/a" : "–")),
               h("td", { class: "why" }, describeDecision(s)));
           })))
-      : h("p", { class: "muted" }, "No routing decisions seen yet."));
+      : h("p", { class: "muted" }, "No decisions yet."));
   }
 
   function updateHealth() {
@@ -250,7 +249,7 @@ export function initRouting(root, ctx) {
     fill(el("rt-health"), evs.length
       ? h("ul", { class: "plain" }, ...evs.slice(0, 12).map((e) => h("li", {}, new Date(e.ts * 1000).toLocaleTimeString(), " · ", replicaChip(e.replica, replicaLabel(e.replica)),
           e.circuit.from !== e.circuit.to ? ` circuit ${e.circuit.from} → ${e.circuit.to}` : "", e.healthy.from !== e.healthy.to ? ` health ${e.healthy.from ? "up" : "down"} → ${e.healthy.to ? "up" : "down"}` : "")))
-      : h("p", { class: "muted" }, "No replica state changes since this page loaded."));
+      : h("p", { class: "muted" }, "No changes."));
   }
 
   function render() { updateDiagram(); updateTimeline(); updateDecisions(); updateHealth(); }

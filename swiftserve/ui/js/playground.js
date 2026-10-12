@@ -34,7 +34,7 @@ export function initPlayground(root, ctx) {
           h("button", { id: "pg-stop", class: "ghost", disabled: true }, "Abort in-flight")),
         h("div", { id: "pg-status", class: "status", role: "status" })),
       h("div", { class: "stack" },
-        h("section", { class: "card" }, h("h2", {}, "Response"), h("div", { id: "pg-output", class: "output", "aria-live": "polite" }, h("span", { class: "muted" }, "Nothing sent yet."))),
+        h("section", { class: "card" }, h("h2", {}, "Response"), h("div", { id: "pg-output", class: "output", "aria-live": "polite" }, h("span", { class: "muted" }, ""))),
         h("section", { class: "card" }, h("h2", {}, "Result"), h("div", { id: "pg-detail" })),
         h("section", { class: "card" }, h("h2", {}, "Requests"), h("div", { id: "pg-history", class: "tablewrap" })))));
 
@@ -65,7 +65,7 @@ export function initPlayground(root, ctx) {
     }));
     clear(el("pg-history")).append(rows.length
       ? h("table", { class: "grid" }, h("thead", {}, h("tr", {}, ...["State", "Served by", "TTFT", "Total"].map((t) => h("th", {}, t)))), body)
-      : h("p", { class: "muted" }, "No requests yet."));
+      : h("p", { class: "muted" }, "None yet."));
   }
 
   function select(id) {
@@ -100,7 +100,7 @@ export function initPlayground(root, ctx) {
     state.history.length = Math.min(state.history.length, 25);
     state.selectedId = id;
     const out = el("pg-output"); out.textContent = "";
-    out.append(h("span", { class: "muted" }, "waiting for the first token…"));
+    out.append(h("span", { class: "muted" }, "…"));
     setStatus(`Request ${shortId(id)} sent.`);
     render();
 

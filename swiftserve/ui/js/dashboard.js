@@ -38,8 +38,8 @@ export function initDashboard(root, ctx) {
     const gpuBlock = g.available
       ? [meter((g.utilization_pct ?? null) === null ? null : g.utilization_pct / 100, `GPU utilization ${g.utilization_pct === null ? "n/a" : g.utilization_pct + "%"}`, "gpu"),
          meter(g.memory_total_mib ? g.memory_used_mib / g.memory_total_mib : null, `VRAM ${fmtNum(g.memory_used_mib)} / ${fmtNum(g.memory_total_mib)} MiB`, "gpu"),
-         g.temperature_c !== null && g.temperature_c !== undefined ? h("div", { class: "muted small" }, `${g.temperature_c} °C · ${g.source}`) : h("div", { class: "muted small" }, g.source)]
-      : [h("div", { class: "unavail", title: g.reason }, "GPU utilization / VRAM: unavailable"), h("div", { class: "muted small" }, g.reason)];
+         g.temperature_c !== null && g.temperature_c !== undefined ? h("div", { class: "muted small" }, `${g.temperature_c} °C`) : null]
+      : [h("div", { class: "unavail", title: g.reason }, "GPU: unavailable (hover for reason)")];
     let host = r.base_url; try { host = new URL(r.base_url).host; } catch { /* keep */ }
     return h("section", { class: "card replica" , style: { borderTopColor: `var(--r${r.replica_id % 8})` } },
       h("div", { class: "card-head" }, h("h3", {}, replicaChip(r.replica_id, `R${r.replica_id}`), " ", gpuTitle),
@@ -56,7 +56,7 @@ export function initDashboard(root, ctx) {
 
   function render() {
     const snap = store.snapshot;
-    if (!snap) { fill(el("db-banner"), h("p", { class: "muted" }, "Waiting for the first snapshot from the router…")); return; }
+    if (!snap) { fill(el("db-banner"), h("p", { class: "muted" }, "Loading…")); return; }
 
     fill(el("db-banner"), 
       snap.mode.simulated ? h("div", { class: "banner banner-sim" }, h("strong", {}, "SIMULATED"), " ", snap.mode.note) : null,

@@ -194,9 +194,8 @@ export function initLoadTest(root, ctx) {
           h("div", { class: "bars" },
             h("div", { class: "bar sel", style: { width: (tally[rid].selected / max) * 100 + "%", background: `color-mix(in srgb, var(--r${rid % 8}) 45%, transparent)` } }),
             h("div", { class: "bar srv", style: { width: (tally[rid].served / max) * 100 + "%", background: `var(--r${rid % 8})` } })),
-          h("div", { class: "distnum" }, `selected ${tally[rid].selected} · served ${tally[rid].served}` + (tally[rid].failed ? ` · failed ${tally[rid].failed}` : "")))),
-        h("p", { class: "muted small" }, "Pale bar: replicas the policy selected. Solid bar: replicas that actually returned a response. They differ only when requests fail or are aborted."))
-      : h("p", { class: "muted" }, "Routing decisions appear here as the router reports them."));
+          h("div", { class: "distnum" }, `selected ${tally[rid].selected} · served ${tally[rid].served}` + (tally[rid].failed ? ` · failed ${tally[rid].failed}` : "")))))
+      : h("p", { class: "muted" }, "Nothing yet."));
 
     // summary (router-measured)
     const done = reqs.filter((r) => r.server.state === "completed");
@@ -209,7 +208,7 @@ export function initLoadTest(root, ctx) {
           stat("TTFT p50", fmtMs(percentile(ttft, 50))), stat("TTFT p95", fmtMs(percentile(ttft, 95))), stat("ITL mean", fmtMs(mean(itl), 1)),
           stat("tokens/s", elapsedS > 0 ? fmtNum(toks / elapsedS, 1) : "n/a"),
           stat("prompt reused from cache", promptTok ? fmtNum((cachedTok / promptTok) * 100, 0) + " %" : "n/a"))
-      : h("p", { class: "muted" }, "Summary appears after the first request completes. TTFT/ITL exist only for streaming requests."));
+      : h("p", { class: "muted" }, "Appears after the first request completes."));
 
     // table
     const only = el("lt-onlyfail").checked;
@@ -227,7 +226,7 @@ export function initLoadTest(root, ctx) {
               h("td", { class: "num" }, `${fmtNum(s.cached_tokens)} / ${fmtNum(s.prompt_tokens)}`),
               h("td", { class: "ans", title: s.error || (c && c.error) || "" }, s.error || (c && c.error) || ""));
           })))
-      : h("p", { class: "muted" }, run.total ? "No rows to show." : "Start a run to see every request here."));
+      : h("p", { class: "muted" }, run.total ? "No rows." : "Start a run to see requests here."));
   }, 150);
 
   // ---- export ----------------------------------------------------------------------------------

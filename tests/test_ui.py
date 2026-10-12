@@ -71,3 +71,19 @@ def test_every_util_helper_a_view_calls_is_imported():
         for name in exported:
             if re.search(rf"(?<![\w.]){name}\(", src) and name not in imported and name not in local:
                 raise AssertionError(f"{f.name} calls {name}() without importing it from util.js")
+
+
+def test_every_ui_module_parses():
+    """The Python suite never executes the UI, so a stray parenthesis would only show up in a browser."""
+    import pathlib
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    for f in pathlib.Path("swiftserve/ui/js").glob("*.js"):
+        r = subprocess.run([node, "--input-type=module", "--check"], input=f.read_text(), capture_output=True, text=True)
+        assert r.returncode == 0, f"{f.name}: {r.stderr[:300]}"

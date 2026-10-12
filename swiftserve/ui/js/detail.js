@@ -23,7 +23,7 @@ function stateChip(state) {
 
 function renderFull(container, req, { replicaLabel = (rid) => `R${rid}` } = {}) {
   container.textContent = "";
-  if (!req) { container.append(h("p", { class: "muted" }, "Select a request to see exactly what happened to it.")); return; }
+  if (!req) { container.append(h("p", { class: "muted" }, "Nothing selected.")); return; }
   const s = req.server, c = req.client;
 
   // ---- header ----
@@ -62,7 +62,6 @@ function renderFull(container, req, { replicaLabel = (rid) => `R${rid}` } = {}) 
         h("td", {}, cd.healthy === null ? "unknown" : cd.healthy ? "up" : "down"),
         h("td", { class: "num" }, cd.in_flight), h("td", { class: "num" }, cd.queue_depth),
         h("td", { class: "num" }, fmtMs(cd.est_latency_ms)), h("td", { class: "num" }, cd.batch_capacity))))));
-    container.append(h("p", { class: "muted small" }, "State of every replica at the instant the decision was made (read before the policy ran)."));
   }
 
   // ---- timings ----
@@ -106,7 +105,7 @@ function renderFull(container, req, { replicaLabel = (rid) => `R${rid}` } = {}) 
 export function renderDetail(container, req, opts = {}) {
   const replicaLabel = opts.replicaLabel || ((rid) => `R${rid}`);
   container.textContent = "";
-  if (!req) { container.append(h("p", { class: "muted" }, "Send a request or select one to see what happened to it.")); return; }
+  if (!req) { container.append(h("p", { class: "muted" }, "Nothing selected.")); return; }
   const s = req.server, c = req.client;
   const noStream = s.stream === false;
   const err = (c && c.error) || s.error;
