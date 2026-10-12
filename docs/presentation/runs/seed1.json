@@ -1,0 +1,80 @@
+{
+  "config": {
+    "n": 60,
+    "conc": 8,
+    "tenants": 6,
+    "tokens": 1500,
+    "maxTokens": 16,
+    "seed": 1,
+    "model": "Qwen/Qwen2.5-3B-Instruct"
+  },
+  "order": [
+    "round_robin",
+    "least_connections",
+    "swiftserve",
+    "prefix_aware"
+  ],
+  "source": "values read from a screenshot of the Compare tab (rounded as displayed); not an export file",
+  "results": {
+    "round_robin": {
+      "completed": 60,
+      "failed": 0,
+      "ttft_p50": 1033,
+      "ttft_p95": 1887,
+      "itl_mean": 41.0,
+      "cache_reuse": 0.55,
+      "spread": 1.0,
+      "per_replica": {
+        "0": 15,
+        "1": 15,
+        "2": 15,
+        "3": 15
+      }
+    },
+    "least_connections": {
+      "completed": 60,
+      "failed": 0,
+      "ttft_p50": 1063,
+      "ttft_p95": 1921,
+      "itl_mean": 37.1,
+      "cache_reuse": 0.48,
+      "spread": 1.53,
+      "per_replica": {
+        "0": 23,
+        "1": 12,
+        "2": 16,
+        "3": 9
+      }
+    },
+    "swiftserve": {
+      "completed": 60,
+      "failed": 0,
+      "ttft_p50": 537,
+      "ttft_p95": 1690,
+      "itl_mean": 53.7,
+      "cache_reuse": 0.69,
+      "spread": 1.33,
+      "per_replica": {
+        "0": 12,
+        "1": 13,
+        "2": 15,
+        "3": 20
+      }
+    },
+    "prefix_aware": {
+      "completed": 60,
+      "failed": 0,
+      "ttft_p50": 464,
+      "ttft_p95": 2671,
+      "itl_mean": 43.3,
+      "cache_reuse": 0.87,
+      "spread": 1.47,
+      "per_replica": {
+        "0": 22,
+        "1": 12,
+        "2": 19,
+        "3": 7
+      }
+    }
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "config": {
+    "n": 60,
+    "conc": 8,
+    "tenants": 6,
+    "tokens": 1500,
+    "maxTokens": 16,
+    "seed": 3,
+    "model": "Qwen/Qwen2.5-3B-Instruct"
+  },
+  "order": [
+    "round_robin",
+    "least_connections",
+    "swiftserve",
+    "prefix_aware"
+  ],
+  "results": {
+    "round_robin": {
+      "requests": 60,
+      "completed": 60,
+      "failed": 0,
+      "ttft_p50": 797.8052705002483,
+      "ttft_p95": 1829.4889184566266,
+      "itl_mean": 41.99116166768361,
+      "cache_reuse": 0.5582725087175933,
+      "avg_prompt_tokens": 1539.0333333333333,
+      "per_replica": {
+        "0": 15,
+        "1": 15,
+        "2": 15,
+        "3": 15
+      },
+      "spread": 1
+    },
+    "least_connections": {
+      "requests": 60,
+      "completed": 60,
+      "failed": 0,
+      "ttft_p50": 868.3671040053014,
+      "ttft_p95": 2254.868078848085,
+      "itl_mean": 46.6860034311119,
+      "cache_reuse": 0.5532590032818239,
+      "avg_prompt_tokens": 1533.7,
+      "per_replica": {
+        "0": 19,
+        "1": 12,
+        "2": 20,
+        "3": 9
+      },
+      "spread": 1.3333333333333333
+    },
+    "swiftserve": {
+      "requests": 60,
+      "completed": 60,
+      "failed": 0,
+      "ttft_p50": 927.2777499936637,
+      "ttft_p95": 1490.7842711501867,
+      "itl_mean": 37.70487810116416,
+      "cache_reuse": 0.6868380585215829,
+      "avg_prompt_tokens": 1539.0333333333333,
+      "per_replica": {
+        "0": 13,
+        "1": 18,
+        "2": 16,
+        "3": 13
+      },
+      "spread": 1.2
+    },
+    "prefix_aware": {
+      "requests": 60,
+      "completed": 60,
+      "failed": 0,
+      "ttft_p50": 470.5680620027124,
+      "ttft_p95": 1547.9987749982665,
+      "itl_mean": 35.10847763997541,
+      "cache_reuse": 0.8592727825954664,
+      "avg_prompt_tokens": 1533.7,
+      "per_replica": {
+        "0": 26,
+        "1": 14,
+        "2": 12,
+        "3": 8
+      },
+      "spread": 1.7333333333333334
+    }
+  }
+}

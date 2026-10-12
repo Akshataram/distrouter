@@ -93,18 +93,17 @@ function addSlide(section, layout = "CONTENT") {
 }
 function title(slide, str) { slide.addText(str, { placeholder: "title" }); }
 
-// Measurements written by:  python scripts/demo.py --replicas ... --policies ... --json-out docs/presentation/results.json
+// Measurements: every *.json in docs/presentation/runs/ is one run (a Compare-tab "Export JSON" or a
+// scripts/demo.py --json-out file). With several runs the slide shows means and ranges.
 // Simulated runs (fake replicas) are never put in the deck unless ALLOW_SIMULATED=1 is set for layout testing.
-const RESULTS_PATH = process.env.RESULTS_JSON || path.join(HERE, "results.json");
-let RESULTS = null;
-if (fs.existsSync(RESULTS_PATH)) {
-  RESULTS = JSON.parse(fs.readFileSync(RESULTS_PATH, "utf8"));
-  if (RESULTS.simulated && !process.env.ALLOW_SIMULATED) {
-    console.warn("results.json comes from simulated replicas; the comparison slide is left out.");
-    RESULTS = null;
-  }
+const RUNS_DIR = path.join(HERE, "runs");
+let RUNS = [];
+if (process.env.RESULTS_JSON) RUNS = [JSON.parse(fs.readFileSync(process.env.RESULTS_JSON, "utf8"))];
+else if (fs.existsSync(RUNS_DIR)) RUNS = fs.readdirSync(RUNS_DIR).filter((f) => f.endsWith(".json")).sort().map((f) => JSON.parse(fs.readFileSync(path.join(RUNS_DIR, f), "utf8")));
+if (RUNS.some((r) => r.simulated) && !process.env.ALLOW_SIMULATED) {
+  console.warn("a results file comes from simulated replicas; the comparison slide is left out.");
+  RUNS = [];
 }
-
 
 (async () => {
   for (const s of ["Context", "Approach", "Evidence", "Close"]) pres.addSection({ title: s });
@@ -401,40 +400,45 @@ if (fs.existsSync(RESULTS_PATH)) {
   }
 
   // ============ 15. Comparison results (only with real measurements) ============
-  // Accepts scripts/demo.py --json-out ("policies": true_cache_ratio, replica_spread, goodput) or the
-// console's Compare tab "Export JSON" ("results": cache_reuse, spread).
-const rawPol = (RESULTS && (RESULTS.policies || RESULTS.results)) || {};
-const pol = Object.fromEntries(Object.entries(rawPol).map(([k, v]) => [k, { ...v, true_cache_ratio: v.true_cache_ratio ?? v.cache_reuse ?? null, replica_spread: v.replica_spread ?? v.spread ?? null, goodput: v.goodput ?? null }]));
-const hasGoodput = Object.values(pol).some((v) => v.goodput !== null);
-  const names = ["round_robin", "least_connections", "swiftserve", "prefix_aware"].filter((n) => pol[n]);
+  const POLS = ["round_robin", "least_connections", "swiftserve", "prefix_aware"];
+  const avg = (xs) => xs.reduce((x, y) => x + y, 0) / xs.length;
+  const norm = (v) => ({ p50: v.ttft_p50, p95: v.ttft_p95, cache: v.cache_reuse ?? v.true_cache_ratio ?? null, spread: v.spread ?? v.replica_spread ?? null });
+  const runs = RUNS.map((r) => Object.fromEntries(Object.entries(r.policies || r.results || {}).map(([k, v]) => [k, norm(v)])));
+  const names = POLS.filter((p) => runs.length && runs.every((r) => r[p] && r[p].p50 !== null && r[p].p50 !== undefined));
   if (names.length >= 2) {
     const s = addSlide("Evidence");
-    title(s, "Measured policy comparison");
-    const v = (k) => names.map((n) => Math.round(pol[n][k] ?? 0));
+    title(s, runs.length > 1 ? `Measured policy comparison, ${runs.length} runs` : "Measured policy comparison");
+    const agg = Object.fromEntries(names.map((n) => {
+      const col = (k) => runs.map((r) => r[n][k]);
+      const cache = col("cache").filter((x) => x !== null), spread = col("spread").filter((x) => x !== null);
+      return [n, { p50: avg(col("p50")), p50min: Math.min(...col("p50")), p50max: Math.max(...col("p50")), p95: avg(col("p95")), cache: cache.length ? avg(cache) : null, spread: spread.length ? avg(spread) : null }];
+    }));
     s.addChart(pres.charts.BAR, [
-      { name: "TTFT median (ms)", labels: names, values: v("ttft_p50") },
-      { name: "TTFT 95th percentile (ms)", labels: names, values: v("ttft_p95") },
+      { name: "TTFT median (ms)", labels: names, values: names.map((n) => Math.round(agg[n].p50)) },
+      { name: "TTFT 95th percentile (ms)", labels: names, values: names.map((n) => Math.round(agg[n].p95)) },
     ], {
-      x: 0.5, y: 1.2, w: 5.0, h: 3.2, barDir: "col", barGrouping: "clustered", chartColors: [HEX.accent1, HEX.accent2], showLegend: true, legendPos: "b", legendFontSize: 12, legendColor: HEX.dk2, legendFontFace: "+mn-lt",
+      x: 0.5, y: 1.2, w: 4.7, h: 3.2, barDir: "col", barGrouping: "clustered", chartColors: [HEX.accent1, HEX.accent2], showLegend: true, legendPos: "b", legendFontSize: 12, legendColor: HEX.dk2, legendFontFace: "+mn-lt",
       showValue: true, dataLabelPosition: "outEnd", dataLabelFontSize: 11, dataLabelColor: HEX.dk1, dataLabelFontFace: "+mn-lt", catAxisLabelColor: HEX.dk2, valAxisLabelColor: HEX.dk2, catAxisLabelFontSize: 11, valAxisLabelFontSize: 11,
       catAxisLabelFontFace: "+mn-lt", valAxisLabelFontFace: "+mn-lt", valGridLine: { color: "E1E4EA", size: 0.5 }, catGridLine: { style: "none" }, valAxisMinVal: 0,
     });
-    const pct = (x) => (x === null || x === undefined ? "n/a" : (x * 100).toFixed(0) + " %");
+    const pct = (x) => (x === null ? "n/a" : (x * 100).toFixed(0) + " %");
     const head = (t) => ({ text: t, options: { bold: true, color: C.background1, fill: { color: C.text1 }, fontSize: 12, fontFace: THEME.bodyFontFace } });
     const cell = (t, i, o = {}) => ({ text: String(t), options: { fontSize: 12, fontFace: THEME.bodyFontFace, color: C.text1, fill: { color: i % 2 ? C.background1 : C.background2 }, ...o } });
-    const spreadTxt = (n) => (pol[n].replica_spread === null ? "n/a" : pol[n].replica_spread.toFixed(2));
-    s.addTable([[head("Policy"), head("Cache reuse"), ...(hasGoodput ? [head("Goodput")] : []), head("Max : mean load")],
-      ...names.map((n, i) => [cell(n, i, { bold: true }), cell(pct(pol[n].true_cache_ratio), i), ...(hasGoodput ? [cell(pct(pol[n].goodput), i)] : []), cell(spreadTxt(n), i)])],
-      { x: 5.7, y: 1.3, w: 3.8, colW: hasGoodput ? [1.6, 0.75, 0.65, 0.8] : [1.8, 1.0, 1.0], border: { type: "solid", pt: 0.5, color: C.accent4 }, margin: [0.05, 0.06, 0.05, 0.06], objectName: "Comparison table" });
-    const ok = names.filter((n) => pol[n].ttft_p50);
-    const best = ok.reduce((a, b) => (pol[a].ttft_p50 <= pol[b].ttft_p50 ? a : b));
-    const worst = ok.filter((n) => n !== best).reduce((a, b) => (pol[a].ttft_p50 >= pol[b].ttft_p50 ? a : b));
-    const w = RESULTS.workload || RESULTS.config || {};
-    const tenants = w.num_apps ?? w.tenants, sysTok = w.system_prompt_tokens ?? w.tokens, reqs = w.sessions ?? w.n, conc = w.concurrency ?? w.conc;
-    const bestP95 = ok.filter((n) => pol[n].ttft_p95).reduce((a, b) => (pol[a].ttft_p95 <= pol[b].ttft_p95 ? a : b));
-    const tail = bestP95 === best ? "" : ` Its 95th percentile was ${Math.round(pol[best].ttft_p95)} ms, against ${Math.round(pol[bestP95].ttft_p95)} ms for ${bestP95}.`;
-    text(s, `${best} had the lowest median TTFT, ${(pol[worst].ttft_p50 / pol[best].ttft_p50).toFixed(1)}x lower than ${worst}.${tail} Single run: ${reqs} requests per policy, ${tenants} tenants with system prompts of about ${sysTok} tokens, concurrency ${conc}, ${RESULTS.replicas || 4} replicas, policies run one after another.`, { x: 0.5, y: 4.55, w: 9, h: 0.7, fontSize: 13, color: C.text2 });
-    s.addNotes("All policies ran the same workload on the same replicas, one after another, each in its own prompt namespace so that none benefited from a cache warmed by an earlier run. Read time to first token first, because that is where prefill savings show up. Cache reuse is the share of prompt tokens the engines reported as cached. Goodput is the share of requests that met both the time-to-first-token and per-token targets. Max-to-mean load shows how evenly requests spread: 1.0 is perfectly even, higher means one replica took more than its share. Compare the median and the 95th percentile separately: a policy can have the best median and a worse tail, because concentrating requests on the replicas that hold a cache can also concentrate queueing. The policies ran one after another in a single run, so this is a controlled demonstration; repeating it with another seed and the order reversed checks that the ranking holds.");
+    const range = (n) => (runs.length > 1 ? `${Math.round(agg[n].p50)} (${Math.round(agg[n].p50min)}-${Math.round(agg[n].p50max)})` : String(Math.round(agg[n].p50)));
+    s.addTable([[head("Policy"), head(runs.length > 1 ? "Median TTFT, ms: mean (range)" : "Median TTFT, ms"), head("Cache reuse"), head("Busiest ÷ mean load")],
+      ...names.map((n, i) => [cell(n, i, { bold: true }), cell(range(n), i), cell(pct(agg[n].cache), i), cell(agg[n].spread === null ? "n/a" : agg[n].spread.toFixed(2), i)])],
+      { x: 5.4, y: 1.3, w: 4.1, colW: [1.45, 1.2, 0.7, 0.75], border: { type: "solid", pt: 0.5, color: C.accent4 }, margin: [0.05, 0.06, 0.05, 0.06], objectName: "Comparison table" });
+    const ranked = names.slice().sort((a, b) => agg[a].p50 - agg[b].p50);
+    const best = ranked[0], second = ranked[1], worst = ranked[ranked.length - 1];
+    const wins = runs.filter((r) => names.slice().sort((a, b) => r[a].p50 - r[b].p50)[0] === best).length;
+    const p95ranks = runs.map((r) => names.slice().sort((a, b) => r[a].p95 - r[b].p95).indexOf(best) + 1);
+    const w0 = (RUNS[0].config || RUNS[0].workload || {});
+    const tenants = w0.tenants ?? w0.num_apps, sysTok = w0.tokens ?? w0.system_prompt_tokens, reqs = w0.n ?? w0.sessions, conc = w0.conc ?? w0.concurrency;
+    const seeds = RUNS.map((r) => (r.config || r.workload || {}).seed).filter((x) => x !== undefined);
+    const rev = RUNS.some((r) => r.order && r.order[0] === "prefix_aware");
+    const tail = p95ranks.every((x) => x === 1) ? "" : ` Its 95th-percentile rank across the runs was ${p95ranks.join(", ")} of ${names.length} (1 is best), so the tail was mixed.`;
+    text(s, `${best} had the lowest median TTFT in ${wins} of ${runs.length} run${runs.length > 1 ? "s" : ""} (mean ${Math.round(agg[best].p50)} ms; ${(agg[second].p50 / agg[best].p50).toFixed(1)}x lower than ${second}, ${(agg[worst].p50 / agg[best].p50).toFixed(1)}x lower than ${worst}).${tail} ${runs.length > 1 ? `Seeds ${seeds.join(", ")}${rev ? ", one run in reverse policy order" : ""}; ` : ""}${reqs} requests per policy, ${tenants} tenants with system prompts of about ${sysTok} tokens, concurrency ${conc}, 4 replicas.`, { x: 0.5, y: 4.5, w: 9, h: 0.75, fontSize: 13, color: C.text2 });
+    s.addNotes("All policies ran the same seeded workload on the same four GPUs, one after another, each in its own prompt namespace so none benefited from a cache warmed by an earlier policy, and the router's learned latency state was reset between policies. The experiment was repeated with different seeds, and one run used the reverse policy order, so a policy that is simply lucky in its position would not win every time. Read the median first: that is where prefill savings show up, and the prefix-aware policy had the lowest median in every run. Cache reuse is the share of prompt tokens the engines reported as cached, and it ranked the policies the same way in every run. The tail is different: the 95th percentile rank of the prefix-aware policy varied between runs, so no firm claim about the tail is supported. It also had the most uneven load, since it sends a tenant back to the replica holding its cache. The swiftserve policy beat both load-based baselines on median in two runs and lost to both in the third, so its advantage over them is not established. Run 1 values were read from the console screenshot and are rounded; runs 2 and 3 are the exported files.");
   }
 
   // ============ 16. Demo ============
@@ -487,5 +491,5 @@ const hasGoodput = Object.values(pol).some((v) => v.goodput !== null);
 
   await pres.writeFile({ fileName: OUT });
   await applyTheme(OUT, THEME);
-  console.log("wrote", OUT, "(comparison slide:", names.length >= 2 ? "included" : "not included, no measurements", ")");
+  console.log("wrote", OUT, "(comparison slide:", names.length >= 2 ? `included (${runs.length} run(s))` : "not included, no measurements", ")");
 })();

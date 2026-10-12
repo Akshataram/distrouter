@@ -4,7 +4,7 @@
 
 ## Adding the measured policy comparison
 
-The comparison slide appears only when `results.json` holds real measurements.
+The comparison slide appears only when `runs/*.json` holds real measurements.
 Create it by running the four policies on identical traffic against your real replicas
 (the router runs locally; each policy runs in its own prompt namespace so none inherits another's cache):
 
@@ -15,7 +15,7 @@ python3 scripts/demo.py \
   --model Qwen/Qwen2.5-3B-Instruct --tokenizer Qwen/Qwen2.5-3B-Instruct \
   --max-num-seqs 4 --num-apps 6 --system-prompt-tokens 1500 \
   --sessions 60 --concurrency 8 --max-tokens 16 --seed 1 \
-  --json-out docs/presentation/results.json
+  --json-out docs/presentation/runs/*.json
 ```
 
 Repeat with `--seed 2` and the policies in reverse order to check the ranking holds, then rebuild:
@@ -24,4 +24,4 @@ Repeat with `--seed 2` and the policies in reverse order to check the ranking ho
 NODE_PATH=<dir with node_modules> node docs/presentation/build_deck.js
 ```
 
-`results.json` written from simulated replicas (no `--replicas`) is ignored by the builder.
+`runs/*.json` written from simulated replicas (no `--replicas`) is ignored by the builder.

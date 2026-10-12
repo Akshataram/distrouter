@@ -217,6 +217,17 @@ Also note the capacity consequence: with a 6 000-token KV cache and ~1.6k-token 
   | Requests per replica R0/R1/R2/R3 | 15/15/15/15 | 23/12/16/9 | 12/13/15/20 | 22/12/19/7 |
 
   All 240 requests completed. `prefix_aware` had the lowest median TTFT (about 2.2-2.3x lower than the two load-based baselines) and the highest cache reuse; 87% is close to the ceiling for this workload (each tenant's prompt must miss once, about 90% with 6 tenants over 60 requests; this ceiling is a calculation, not a measurement). **Its 95th-percentile TTFT was the worst of the four**; it also placed 22 requests on one replica and 7 on another, which is consistent with queueing on the busy replica but has not been confirmed per request. `swiftserve` was a close second on median and cache reuse; why was not investigated. The run is a single seed in a fixed policy order on shared Colab GPUs, so it does not yet establish that `prefix_aware` is better overall; the next check is a repeat with another seed and the order reversed, and the per-request export (Compare tab, "Export JSON") to trace the tail.
+- **Compare tab, three real runs on four Colab T4 nodes** (seeds 1, 2, 3; run 2 in reverse policy order; each: 60 requests per policy, 6 tenants with ~1,500-token system prompts, concurrency 8, `max_tokens` 16, each policy in its own prompt namespace, policies one after another). Run 1 values were read from a screenshot (rounded); runs 2 and 3 are exported files kept in `docs/presentation/runs/`. All 720 requests completed with no failures.
+
+  | | round_robin | least_connections | swiftserve | prefix_aware |
+  |---|---|---|---|---|
+  | TTFT median, per run (ms) | 1033 / 1066 / 798 | 1063 / 1048 / 868 | 537 / 830 / 927 | **464 / 420 / 471** |
+  | TTFT median, mean | 966 | 993 | 765 | **451** |
+  | TTFT 95th percentile, per run (ms) | 1887 / 1816 / 1829 | 1921 / 1619 / 2255 | 1690 / 1975 / 1491 | 2671 / 1799 / 1548 |
+  | Cache reuse, per run | 55% / 48% / 56% | 48% / 52% / 55% | 69% / 59% / 69% | **87% / 84% / 86%** |
+  | Busiest replica ÷ mean, per run | 1.00 / 1.00 / 1.00 | 1.53 / 1.20 / 1.33 | 1.33 / 1.27 / 1.20 | 1.47 / 1.53 / 1.73 |
+
+  What the three runs support: `prefix_aware` had the lowest median TTFT in all three runs, including the run where it went first, and the highest cache reuse in all three; its mean median TTFT was about 1.7x lower than `swiftserve`'s and 2.1-2.2x lower than the two load-based baselines. What they do not support: a tail-latency claim (its 95th-percentile rank was 4th, 2nd and 2nd of 4; run 1's 2,671 ms was not repeated); and any claim that `swiftserve` beats the baselines (it was faster than both on median in runs 1 and 2 and slower than both in run 3, although its cache reuse was consistently higher). `prefix_aware` also had the most uneven load (mean 1.58), the cost of sending a tenant back to the replica that holds its cache. Run-to-run spread of the baselines' median (798-1,066 ms for round_robin) shows the measurement noise on shared Colab GPUs. Whether the router's learned latency state had been reset between policies depends on the router version in use: that reset was added after run 1.
 - Still **not** observed: the effect of a long shared system prompt through the router, traffic spreading across R1-R3 under concurrency, and any comparison against the baseline policies.
 
 The node was cloned at commit `32d1160` (before this console existed), so it has no `/sidecar/gpu` yet; GPU rows will say "unavailable" until the node's repo is updated.
