@@ -86,3 +86,18 @@ async def test_requests_use_the_new_policy(router_env, switch_enabled):
     assert r.status_code == 200
     recs = router_env.telemetry.recent(1)
     assert recs and recs[0].policy == "least_connections"
+
+
+async def test_switch_clears_what_earlier_traffic_taught_the_router(router_env, switch_enabled):
+    r = router_env.replicas[0]
+    seed = r.ewma_latency_ms
+    r.ewma_latency_ms = 4000.0
+    r._observed_max_concurrency = 17
+    r._session_last_used["s1"] = 1.0
+    r.in_flight = 0
+    await post(router_env, "prefix_aware")
+    assert r.ewma_latency_ms == seed
+    assert r._observed_max_concurrency == 0
+    assert not r._session_last_used
+    assert r._bucket_observed == [False] * len(r._bucket_observed)
+    assert r.circuit.state == "closed"           # health is a fact about the replica, not learned routing state

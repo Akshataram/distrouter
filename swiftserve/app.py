@@ -231,6 +231,8 @@ async def switch_policy(body: PolicySwitch):
     if in_flight:
         raise HTTPException(status_code=409, detail=f"{in_flight} request(s) in flight; wait until they finish")
     previous = policy.name
+    for r in replicas:
+        r.reset_learned_state()  # every policy starts from the same knowledge of the replicas
     policy = _build_policy(body.name)
     bus.emit("policy.changed", None, **{"from": previous, "to": policy.name})
     logger.info("routing policy switched: %s -> %s", previous, policy.name)

@@ -151,7 +151,7 @@ Open `http://127.0.0.1:8000/ui/`. Notes:
 
 ### Comparing the four policies in the console (Compare tab)
 
-`POST /api/policy {"name": ...}` replaces the router's policy with a fresh instance (empty prefix index or trie). It is
+`POST /api/policy {"name": ...}` replaces the router's policy with a fresh instance (empty prefix index or trie) and clears what earlier traffic taught the router about each replica (latency average, latency-by-load table, highest concurrency seen, session table; the circuit breaker is untouched), so every policy starts from the same knowledge. It is
 disabled unless `SWIFTSERVE_ALLOW_POLICY_SWITCH=1` (set by `scripts/dev.py` on a loopback bind), returns 409 while requests
 are in flight, and only builds one of the existing policies. The Compare tab (`ui/js/compare.js`, pure logic in
 `compare_logic.js`) uses it to run, for each policy in turn:
