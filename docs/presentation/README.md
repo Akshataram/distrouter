@@ -25,3 +25,9 @@ NODE_PATH=<dir with node_modules> node docs/presentation/build_deck.js
 ```
 
 `runs/*.json` written from simulated replicas (no `--replicas`) is ignored by the builder.
+
+## Implementation and policies section
+
+`build_section_deck.js` builds `SwiftServe_Implementation_and_Policies.pptx` (the four policies in depth and the
+implementation walkthrough); `IMPLEMENTATION_AND_POLICIES_SCRIPT.md` is the matching speaker script. It uses the same
+theme and the runs in `runs/` for its one evidence slide.
