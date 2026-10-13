@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import socket
 import statistics
@@ -362,6 +363,16 @@ async def main_async(args: argparse.Namespace) -> int:
             router_proc = None
 
         print_report(reports, simulated, len(replica_urls))
+        if args.json_out:
+            Path(args.json_out).write_text(json.dumps({
+                "simulated": simulated,
+                "replicas": len(replica_urls),
+                "workload": {k: getattr(args, k) for k in (
+                    "num_apps", "sessions", "turns", "system_prompt_tokens", "max_tokens", "concurrency", "seed",
+                    "isolate_policies", "max_num_seqs", "block_size", "model")},
+                "policies": reports,
+            }, indent=2))
+            print(f"\nMeasurements written to {args.json_out}")
         return 0
 
     finally:
@@ -413,6 +424,8 @@ def main() -> None:
         "--no-isolate-policies", dest="isolate_policies", action="store_false",
         help="share one prefix namespace across policies and rely on cache resets instead")
     parser.add_argument("--log-dir", default="demo_logs")
+    parser.add_argument("--json-out", default="",
+                        help="also write the measurements to this JSON file (used by docs/presentation/build_deck.js)")
 
     args = parser.parse_args()
     raise SystemExit(asyncio.run(main_async(args)))

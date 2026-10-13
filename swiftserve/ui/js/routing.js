@@ -46,11 +46,11 @@ export function initRouting(root, ctx) {
   root.append(
     h("section", { class: "card" },
       h("div", { class: "card-head" }, h("h2", {}, "Live request flow"), h("span", { id: "rt-legend", class: "muted small" })),
-      h("div", { id: "rt-diagram", class: "diagram" }),
-      h("p", { class: "muted small" }, "Each dot is a real request. It moves only when the router emits the corresponding event. Edge thickness is each replica's share of all routing decisions since the router started; the number inside a replica box is how many requests are dispatched to it right now.")),
-    h("section", { class: "card" }, h("h2", {}, "Timeline of recent requests"), h("div", { id: "rt-timeline", class: "timeline" })),
-    h("section", { class: "card" }, h("h2", {}, "Routing decisions"), h("div", { id: "rt-decisions", class: "tablewrap" })),
-    h("section", { class: "card" }, h("h2", {}, "Replica health changes"), h("div", { id: "rt-health" })));
+      h("div", { id: "rt-diagram", class: "diagram" })),
+    h("section", { class: "card" }, h("h2", {}, "Recent routing decisions"), h("div", { id: "rt-decisions", class: "tablewrap" })),
+    h("details", { class: "card more" }, h("summary", {}, "Timeline and health changes"),
+      h("h2", {}, "Timeline of recent requests"), h("div", { id: "rt-timeline", class: "timeline" }),
+      h("h2", {}, "Replica health changes"), h("div", { id: "rt-health" })));
 
   const el = (id) => root.querySelector("#" + id);
 
@@ -201,13 +201,13 @@ export function initRouting(root, ctx) {
       const reqs = store.all().filter((q) => store.activeReplica(q) === b.rid).slice(-14);
       reqs.forEach((q, i) => b.dots.append(svgEl("circle", { cx: b.x + 14 + (i % 14) * 13, cy: b.y + b.h - 12, r: 4.5, fill: `hsl(${hue(q.id)} 80% 55%)` })));
     }
-    el("rt-legend").textContent = snap.mode.simulated ? "SIMULATED replicas" : "live replicas";
+    el("rt-legend").textContent = snap.mode.simulated ? "SIMULATED replicas" : "";
   }
 
   function updateTimeline() {
     const reqs = store.all().filter((r) => r.server.t_received).slice(-26);
     const box = el("rt-timeline");
-    if (!reqs.length) { fill(box, h("p", { class: "muted" }, "Requests appear here as the router handles them.")); return; }
+    if (!reqs.length) { fill(box, h("p", { class: "muted" }, "No requests yet.")); return; }
     const start = Math.min(...reqs.map((r) => r.server.t_received * 1000));
     const end = Math.max(...reqs.map((r) => r.server.t_received * 1000 + (r.server.at.finished ?? r.server.at.first_token ?? r.server.at.dispatch ?? 0) + 30));
     const span = Math.max(end - start, 200);
@@ -241,7 +241,7 @@ export function initRouting(root, ctx) {
               h("td", {}, s.served !== null ? replicaChip(s.served, replicaLabel(s.served)) : (s.state === "completed" ? "n/a" : "–")),
               h("td", { class: "why" }, describeDecision(s)));
           })))
-      : h("p", { class: "muted" }, "No routing decisions seen yet."));
+      : h("p", { class: "muted" }, "No decisions yet."));
   }
 
   function updateHealth() {
@@ -249,7 +249,7 @@ export function initRouting(root, ctx) {
     fill(el("rt-health"), evs.length
       ? h("ul", { class: "plain" }, ...evs.slice(0, 12).map((e) => h("li", {}, new Date(e.ts * 1000).toLocaleTimeString(), " · ", replicaChip(e.replica, replicaLabel(e.replica)),
           e.circuit.from !== e.circuit.to ? ` circuit ${e.circuit.from} → ${e.circuit.to}` : "", e.healthy.from !== e.healthy.to ? ` health ${e.healthy.from ? "up" : "down"} → ${e.healthy.to ? "up" : "down"}` : "")))
-      : h("p", { class: "muted" }, "No replica state changes since this page loaded."));
+      : h("p", { class: "muted" }, "No changes."));
   }
 
   function render() { updateDiagram(); updateTimeline(); updateDecisions(); updateHealth(); }

@@ -93,8 +93,10 @@ def test_playground_request_is_attributed_by_the_router(page):
     pg.fill("#pg-max", "6")
     pg.click("#pg-send")
     pg.wait_for_function("document.querySelector('#pg-detail').textContent.includes('completed')", timeout=15000)
-    detail = pg.inner_text("#pg-detail")
-    assert "Selected by policy" in detail and "Served by" in detail and "TTFT (time to first token)" in detail
+    detail = pg.inner_text("#pg-detail")                                   # the short summary people actually read
+    assert "Served by" in detail and "Why" in detail and "TTFT" in detail and "Reused from cache" in detail
+    full = pg.text_content("#pg-detail")                                   # the collapsed "All details" section is still there
+    assert "Selected by policy" in full and "Dispatched to" in full
     assert re.search(r"R\d", detail) and "prefix" in detail.lower()
     assert "tok0" in pg.inner_text("#pg-output")
     pg.click("#pg-send")                                                   # same prompt again: should now hit the cache
@@ -140,7 +142,33 @@ def test_routing_view_and_dashboard_render_real_data(page):
     assert pg.locator("#rt-decisions tbody tr").count() >= 1
     pg.click("#tab-dashboard")
     pg.wait_for_function("document.querySelectorAll('.card.replica').length === 3", timeout=10000)
-    text = pg.inner_text("#db-avail")
+    text = pg.text_content("#db-avail")                                   # inside a collapsed section
     assert "GPU utilization / VRAM" in text and "unavailable" in text         # fake replicas have no sidecar: reported, not invented
     assert "SIMULATED" in pg.inner_text("#db-banner")
+    assert all(not p.startswith("pageerror") for p in problems)
+
+
+def test_compare_tab_runs_every_policy_on_the_same_requests_and_restores_the_policy(page, stack):
+    """SIMULATED replicas: this checks the Compare mechanics (same workload per policy, router-measured
+    table, original policy restored), not anything about real GPU performance."""
+    pg, problems = page
+    start_policy = httpx.get(f"{stack}/api/dashboard").json()["router"]["policy"]
+    pg.click("#tab-compare")
+    assert pg.locator("#cp-warn .banner").count() == 0, "dev.py should enable policy switching"
+    pg.fill("#cp-n", "12")
+    pg.fill("#cp-c", "4")
+    pg.fill("#cp-t", "3")
+    pg.fill("#cp-tok", "500")
+    pg.fill("#cp-max", "4")
+    pg.click("#cp-start")
+    pg.wait_for_function("/^(Finished|Comparison failed)/.test(document.querySelector('#cp-status').textContent)", timeout=120000)
+    assert pg.inner_text("#cp-status") == "Finished."
+    header = pg.inner_text("#cp-result thead")
+    assert all(p in header for p in ("round_robin", "least_connections", "swiftserve", "prefix_aware"))
+    assert pg.locator("#cp-result tbody tr").count() >= 5
+    assert "Completed / failed" in pg.inner_text("#cp-result") and "12 / 0" in pg.inner_text("#cp-result")
+    dist = pg.inner_text("#cp-dist")
+    assert "round_robin" in dist and "prefix_aware" in dist
+    pg.wait_for_function(f"document.querySelector('#meta').textContent.includes('policy {start_policy}')", timeout=10000)
+    assert httpx.get(f"{stack}/api/dashboard").json()["router"]["policy"] == start_policy
     assert all(not p.startswith("pageerror") for p in problems)

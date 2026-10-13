@@ -99,6 +99,7 @@ class ReplicaState:
         self.cache_ttl_s = cache_ttl_s
         self.in_flight = 0
         self.metrics = ScrapedMetrics()
+        self._seed_latency_ms = seed_latency_ms
         self.ewma_latency_ms = seed_latency_ms
         self.max_batch_size = assumed_max_batch_size
         self.cold_start_ms_per_token = cold_start_ms_per_token
@@ -111,6 +112,19 @@ class ReplicaState:
             max_reset_timeout_s=circuit_max_reset_timeout_s,
         )
         self._session_last_used: OrderedDict[str, float] = OrderedDict()
+
+    def reset_learned_state(self) -> None:
+        """Forget what earlier traffic taught the router about this replica: the latency average,
+        the latency-by-load table, the highest concurrency seen (it raises the assumed batch
+        capacity) and the session table. Used when the routing policy is switched, so a policy
+        that runs later does not start with knowledge an earlier policy's traffic produced.
+        Not touched: in-flight count (switching is refused while requests are in flight), the
+        circuit breaker and the scraped metrics, which describe the replica itself."""
+        self.ewma_latency_ms = self._seed_latency_ms
+        self._observed_max_concurrency = 0
+        self._bucket_latency_ms = [self._seed_latency_ms] * _NUM_OCCUPANCY_BUCKETS
+        self._bucket_observed = [False] * _NUM_OCCUPANCY_BUCKETS
+        self._session_last_used.clear()
 
     # -- load signals ---------------------------------------------------
 

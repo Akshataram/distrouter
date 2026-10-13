@@ -16,7 +16,7 @@
 //     engine behaviour this page cannot verify.
 
 import { chat } from "./api.js";
-import { fill, fmtMs, fmtNum, h, mean, percentile, replicaChip, shortId, sleep, uid } from "./util.js";
+import { fill, fmtMs, fmtNum, h, mean, percentile, replicaChip, sleep, uid } from "./util.js";
 
 function sampleSystemPrompt(tokens) {
   const topics = ["card disputes", "wire transfers", "overdraft fees", "mortgage questions", "fraud alerts", "account closure"];
@@ -43,11 +43,10 @@ export function initLoadTest(root, ctx) {
     h("div", { class: "split" },
       h("section", { class: "card" },
         h("h2", {}, "Load test"),
-        h("p", { class: "muted small" }, "Every request is sent through the router's real routing path. Nothing here is simulated by the page."),
         h("div", { class: "grid3" },
           h("div", {}, h("label", { for: "lt-n" }, "Requests"), h("input", { id: "lt-n", type: "number", min: 1, max: 5000, value: 60 })),
           h("div", {}, h("label", { for: "lt-c" }, "Concurrency"), h("input", { id: "lt-c", type: "number", min: 1, max: 128, value: 8 })),
-          h("div", {}, h("label", { for: "lt-d" }, "Delay between launches (ms)"), h("input", { id: "lt-d", type: "number", min: 0, value: 0 }))),
+          h("div", {}, h("label", { for: "lt-max" }, "max_tokens"), h("input", { id: "lt-max", type: "number", min: 1, value: 24 }))),
         h("label", { for: "lt-source" }, "Prompt source"),
         h("select", { id: "lt-source" }, h("option", { value: "common" }, "One common prompt for every request"), h("option", { value: "list" }, "List of different prompts (one per line, cycled)")),
         h("label", { for: "lt-prompt", id: "lt-prompt-label" }, "Prompt"),
@@ -57,14 +56,15 @@ export function initLoadTest(root, ctx) {
         h("div", { class: "row-actions" },
           h("button", { id: "lt-sys-gen", class: "ghost" }, "Insert sample ~1500-token system prompt"),
           h("button", { id: "lt-sys-clear", class: "ghost" }, "Clear")),
-        h("div", { class: "grid3" },
-          h("div", {}, h("label", { for: "lt-max" }, "max_tokens"), h("input", { id: "lt-max", type: "number", min: 1, value: 24 })),
-          h("div", {}, h("label", { for: "lt-temp" }, "temperature"), h("input", { id: "lt-temp", type: "number", step: 0.1, min: 0, max: 2, value: 0.7 })),
-          h("div", {}, h("label", { for: "lt-top" }, "top_p"), h("input", { id: "lt-top", type: "number", step: 0.05, min: 0, max: 1, value: 1 }))),
-        h("div", { class: "grid3" },
-          h("div", {}, h("label", { for: "lt-stream" }, "Streaming"), h("select", { id: "lt-stream" }, h("option", { value: "1" }, "on"), h("option", { value: "0" }, "off"))),
-          h("div", {}, h("label", { for: "lt-sla" }, "SLA ms"), h("input", { id: "lt-sla", type: "number", min: 1, placeholder: "router default" })),
-          h("div", {}, h("label", { for: "lt-model" }, "Model name"), h("input", { id: "lt-model", type: "text" }))),
+        h("details", { class: "more" }, h("summary", {}, "Advanced"),
+          h("div", { class: "grid3" },
+            h("div", {}, h("label", { for: "lt-d" }, "Delay between launches (ms)"), h("input", { id: "lt-d", type: "number", min: 0, value: 0 })),
+            h("div", {}, h("label", { for: "lt-temp" }, "temperature"), h("input", { id: "lt-temp", type: "number", step: 0.1, min: 0, max: 2, value: 0.7 })),
+            h("div", {}, h("label", { for: "lt-top" }, "top_p"), h("input", { id: "lt-top", type: "number", step: 0.05, min: 0, max: 1, value: 1 }))),
+          h("div", { class: "grid3" },
+            h("div", {}, h("label", { for: "lt-stream" }, "Streaming (needed for TTFT/ITL)"), h("select", { id: "lt-stream" }, h("option", { value: "1" }, "on"), h("option", { value: "0" }, "off"))),
+            h("div", {}, h("label", { for: "lt-sla" }, "SLA ms"), h("input", { id: "lt-sla", type: "number", min: 1, placeholder: "router default" })),
+            h("div", {}, h("label", { for: "lt-model" }, "Model name"), h("input", { id: "lt-model", type: "text" })))),
         h("div", { class: "row-actions" },
           h("button", { id: "lt-start", class: "primary" }, "Start"),
           h("button", { id: "lt-stop", class: "ghost", disabled: true }, "Stop"),
@@ -180,9 +180,9 @@ export function initLoadTest(root, ctx) {
     fill(el("lt-progress"), 
       run.total ? h("div", { class: "progress", role: "progressbar", "aria-valuenow": pct, "aria-valuemin": 0, "aria-valuemax": 100 }, h("i", { style: { width: pct + "%" } })) : h("p", { class: "muted" }, "No run yet."),
       run.total ? h("div", { class: "stats" },
-        stat("launched", `${run.launched}/${run.total}`), stat("in flight", run.inflight.size), stat("succeeded", run.ok, "ok"), stat("failed", run.failed, run.failed ? "bad" : ""),
-        stat("aborted", run.aborted), stat("router saw disconnect", seenDisconnect), stat("elapsed", elapsedS.toFixed(1) + " s"),
-        stat("completion rate", elapsedS > 0 ? (run.settled / elapsedS).toFixed(1) + " req/s" : "n/a")) : null);
+        stat("launched", `${run.launched}/${run.total}`), stat("succeeded", run.ok, "ok"), stat("failed", run.failed, run.failed ? "bad" : ""),
+        run.aborted ? stat("aborted in browser", run.aborted) : null, seenDisconnect ? stat("router saw disconnect", seenDisconnect) : null,
+        stat("elapsed", elapsedS.toFixed(1) + " s"), stat("req/s", elapsedS > 0 ? (run.settled / elapsedS).toFixed(1) : "n/a")) : null);
 
     // distribution
     const tally = store.tally(reqs);
@@ -194,41 +194,39 @@ export function initLoadTest(root, ctx) {
           h("div", { class: "bars" },
             h("div", { class: "bar sel", style: { width: (tally[rid].selected / max) * 100 + "%", background: `color-mix(in srgb, var(--r${rid % 8}) 45%, transparent)` } }),
             h("div", { class: "bar srv", style: { width: (tally[rid].served / max) * 100 + "%", background: `var(--r${rid % 8})` } })),
-          h("div", { class: "distnum" }, `selected ${tally[rid].selected} · served ${tally[rid].served}` + (tally[rid].failed ? ` · failed ${tally[rid].failed}` : "")))),
-        h("p", { class: "muted small" }, "Pale bar: replicas the policy selected. Solid bar: replicas that actually returned a response. They differ only when requests fail or are aborted."))
-      : h("p", { class: "muted" }, "Routing decisions appear here as the router reports them."));
+          h("div", { class: "distnum" }, `selected ${tally[rid].selected} · served ${tally[rid].served}` + (tally[rid].failed ? ` · failed ${tally[rid].failed}` : "")))))
+      : h("p", { class: "muted" }, "Nothing yet."));
 
     // summary (router-measured)
     const done = reqs.filter((r) => r.server.state === "completed");
     const ttft = done.map((r) => r.server.ttft_ms), total = done.map((r) => r.server.total_ms), itl = done.map((r) => r.server.itl_mean_ms);
     const toks = done.reduce((a, r) => a + (r.server.completion_tokens || 0), 0);
+    const withUsage = done.filter((r) => r.server.cached_tokens !== null && r.server.prompt_tokens);
+    const promptTok = withUsage.reduce((a, r) => a + r.server.prompt_tokens, 0), cachedTok = withUsage.reduce((a, r) => a + r.server.cached_tokens, 0);
     fill(el("lt-summary"), done.length
       ? h("div", { class: "stats" },
-          stat("TTFT p50 (router)", fmtMs(percentile(ttft, 50))), stat("TTFT p95", fmtMs(percentile(ttft, 95))),
-          stat("total p50 (router)", fmtMs(percentile(total, 50))), stat("total p95", fmtMs(percentile(total, 95))),
-          stat("ITL mean", fmtMs(mean(itl), 1)),
-          stat("completion tokens", fmtNum(toks)), stat("tokens/s (engine-reported)", elapsedS > 0 ? fmtNum(toks / elapsedS, 1) : "n/a"))
-      : h("p", { class: "muted" }, "Summary appears after the first request completes. TTFT/ITL exist only for streaming requests."));
+          stat("TTFT p50", fmtMs(percentile(ttft, 50))), stat("TTFT p95", fmtMs(percentile(ttft, 95))), stat("ITL mean", fmtMs(mean(itl), 1)),
+          stat("tokens/s", elapsedS > 0 ? fmtNum(toks / elapsedS, 1) : "n/a"),
+          stat("prompt reused from cache", promptTok ? fmtNum((cachedTok / promptTok) * 100, 0) + " %" : "n/a"))
+      : h("p", { class: "muted" }, "Appears after the first request completes."));
 
     // table
     const only = el("lt-onlyfail").checked;
     const rows = reqs.slice().reverse().filter((r) => !only || r.server.state === "failed" || r.server.state === "rejected" || (r.client && (r.client.status === "error"))).slice(0, 200);
     fill(el("lt-table"), rows.length
       ? h("table", { class: "grid" },
-          h("thead", {}, h("tr", {}, ...["#", "Request", "State", "Selected", "Served", "HTTP", "TTFT", "Total", "Prompt / compl. / cached", "Error"].map((t) => h("th", {}, t)))),
+          h("thead", {}, h("tr", {}, ...["#", "State", "Served by", "TTFT", "Total", "Cached / prompt tokens", "Error"].map((t) => h("th", {}, t)))),
           h("tbody", {}, ...rows.map((r) => {
             const s = r.server, c = r.client;
             const state = c && c.aborted ? "aborted" : s.state === "received" && c && c.status === "pending" ? "pending" : s.state;
             return h("tr", { class: s.state === "failed" ? "rowbad" : "" },
-              h("td", {}, r.label), h("td", {}, h("code", {}, shortId(r.id))), h("td", {}, state),
-              h("td", {}, s.selected === null ? "–" : replicaChip(s.selected, replicaLabel(s.selected))),
+              h("td", {}, r.label), h("td", {}, state),
               h("td", {}, s.served === null ? "–" : replicaChip(s.served, replicaLabel(s.served))),
-              h("td", { class: "num" }, s.http_status ?? (c && c.httpStatus) ?? "–"),
               h("td", { class: "num" }, fmtMs(s.ttft_ms)), h("td", { class: "num" }, fmtMs(s.total_ms)),
-              h("td", { class: "num" }, `${fmtNum(s.prompt_tokens)} / ${fmtNum(s.completion_tokens)} / ${fmtNum(s.cached_tokens)}`),
+              h("td", { class: "num" }, `${fmtNum(s.cached_tokens)} / ${fmtNum(s.prompt_tokens)}`),
               h("td", { class: "ans", title: s.error || (c && c.error) || "" }, s.error || (c && c.error) || ""));
           })))
-      : h("p", { class: "muted" }, run.total ? "No rows to show." : "Start a run to see every request here."));
+      : h("p", { class: "muted" }, run.total ? "No rows." : "Start a run to see requests here."));
   }, 150);
 
   // ---- export ----------------------------------------------------------------------------------

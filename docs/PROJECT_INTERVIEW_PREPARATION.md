@@ -64,7 +64,7 @@ Add: the three replica notions (selected/dispatched/served) and why they differ 
 3. **Playground**: send one request with a long system prompt; show Selected/Dispatched/Served, TTFT, `cached_tokens` (0 first time).
 4. Send a second request with the same system prompt: show it routes to the same replica and `cached_tokens` > 0, with the decision text "matched N blocks".
 5. **Load test**: 40 requests, concurrency 8, common prefix; watch the **Routing** tab and the per-replica tally. Click a request to show its trace.
-6. Switch policy (restart with `--policy round_robin`) and repeat; compare, saying only what you measured.
+6. Open **Compare**, leave the defaults (60 requests, concurrency 8, 6 tenants, 1,500-token system prompts) and press Run. It runs all four policies on the same requests, each in its own prompt namespace, and fills one table. Say only what the table shows; if `prefix_aware` is not best on some row, say so and explain it from the routing decisions.
 7. Stop a node deliberately and show retry/circuit events (only if you've rehearsed it).
 
 ## Files and functions to study first

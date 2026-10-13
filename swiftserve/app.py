@@ -57,53 +57,69 @@ replicas: list[ReplicaState] = [
 
 if settings.policy not in POLICIES:
     raise ValueError(f"Unknown SWIFTSERVE_POLICY={settings.policy!r}; choose from {list(POLICIES)}")
-policy: Policy
-if settings.policy == "swiftserve":
-    # Special-cased (rather than POLICIES[settings.policy]()) so the
-    # cross-session prefix trie picks up the same cache TTL and depth cap
-    # as the rest of the router's config, instead of SwiftServePolicy's
-    # zero-arg default.
-    policy = SwiftServePolicy(PrefixCacheTrie(ttl_s=settings.cache_affinity_ttl_s, max_depth=settings.prefix_trie_max_depth))
-elif settings.policy == "prefix_aware":
-    # Also special-cased: it needs a tokenizer and a block index sized from
-    # config, which a zero-arg constructor cannot supply.
-    _tokenizer = build_tokenizer(settings.model_name, settings.tokenizer)
-    policy = PrefixAwarePolicy(
-        tokenizer=_tokenizer,
-        index=PrefixIndex(block_size=settings.block_size, max_blocks_per_replica=settings.index_max_blocks),
-        cache_threshold=settings.cache_threshold,
-        min_match_tokens=settings.min_match_tokens,
-        # Namespacing by model keeps hashes from one model's cache being
-        # credited to another's if the router is ever repointed.
-        namespace=settings.model_name,
-    )
-    # Fail fast rather than silently behaving like a load balancer: a
-    # tokenizer that returns too few ids yields no full blocks, so the index
-    # matches nothing and every cache prediction is 0. That is invisible in
-    # the output -- it cost a whole 4-GPU experiment run to notice.
-    _probe = [{"role": "system", "content": "probe " * 400}, {"role": "user", "content": "hi"}]
-    _probe_tokens = _tokenizer.encode_chat(_probe)
-    _probe_blocks = len(_probe_tokens) // settings.block_size
-    if _probe_blocks < 2:
-        raise RuntimeError(
-            f"tokenizer {_tokenizer.name!r} produced only {len(_probe_tokens)} tokens for a "
-            f"~400-word probe prompt ({_probe_blocks} blocks of {settings.block_size}). The prefix "
-            f"index cannot work with this, and prefix_aware would silently degrade to least-loaded. "
-            f"Check SWIFTSERVE_TOKENIZER and the installed transformers version."
+
+_tokenizer_cache: dict[str, object] = {}
+
+
+def _get_tokenizer():
+    # Loading a Hugging Face tokenizer is slow, so it is built once and reused if the
+    # policy is rebuilt (see POST /api/policy).
+    if "t" not in _tokenizer_cache:
+        _tokenizer_cache["t"] = build_tokenizer(settings.model_name, settings.tokenizer)
+    return _tokenizer_cache["t"]
+
+
+def _build_policy(name: str) -> Policy:
+    """A fresh policy instance (empty prefix index / trie / counters) for ``name``,
+    configured exactly as the startup policy is."""
+    if name == "swiftserve":
+        # Special-cased (rather than POLICIES[name]()) so the cross-session prefix trie
+        # picks up the same cache TTL and depth cap as the rest of the router's config,
+        # instead of SwiftServePolicy's zero-arg default.
+        return SwiftServePolicy(PrefixCacheTrie(ttl_s=settings.cache_affinity_ttl_s, max_depth=settings.prefix_trie_max_depth))
+    if name == "prefix_aware":
+        # Also special-cased: it needs a tokenizer and a block index sized from
+        # config, which a zero-arg constructor cannot supply.
+        _tokenizer = _get_tokenizer()
+        built = PrefixAwarePolicy(
+            tokenizer=_tokenizer,
+            index=PrefixIndex(block_size=settings.block_size, max_blocks_per_replica=settings.index_max_blocks),
+            cache_threshold=settings.cache_threshold,
+            min_match_tokens=settings.min_match_tokens,
+            # Namespacing by model keeps hashes from one model's cache being
+            # credited to another's if the router is ever repointed.
+            namespace=settings.model_name,
         )
-    logger.info(
-        "prefix index live: tokenizer=%s, probe produced %d tokens = %d blocks of %d",
-        _tokenizer.name, len(_probe_tokens), _probe_blocks, settings.block_size,
-    )
-    if not settings.tokenizer:
-        logger.warning(
-            "policy=prefix_aware is using the ByteChunkTokenizer fallback (SWIFTSERVE_TOKENIZER unset). "
-            "Its block boundaries do NOT match the engine's, so cache predictions will be "
-            "systematically wrong. Set SWIFTSERVE_TOKENIZER=%s for real predictions.",
-            settings.model_name,
+        # Fail fast rather than silently behaving like a load balancer: a
+        # tokenizer that returns too few ids yields no full blocks, so the index
+        # matches nothing and every cache prediction is 0. That is invisible in
+        # the output -- it cost a whole 4-GPU experiment run to notice.
+        _probe = [{"role": "system", "content": "probe " * 400}, {"role": "user", "content": "hi"}]
+        _probe_tokens = _tokenizer.encode_chat(_probe)
+        _probe_blocks = len(_probe_tokens) // settings.block_size
+        if _probe_blocks < 2:
+            raise RuntimeError(
+                f"tokenizer {_tokenizer.name!r} produced only {len(_probe_tokens)} tokens for a "
+                f"~400-word probe prompt ({_probe_blocks} blocks of {settings.block_size}). The prefix "
+                f"index cannot work with this, and prefix_aware would silently degrade to least-loaded. "
+                f"Check SWIFTSERVE_TOKENIZER and the installed transformers version."
+            )
+        logger.info(
+            "prefix index live: tokenizer=%s, probe produced %d tokens = %d blocks of %d",
+            _tokenizer.name, len(_probe_tokens), _probe_blocks, settings.block_size,
         )
-else:
-    policy = POLICIES[settings.policy]()
+        if not settings.tokenizer:
+            logger.warning(
+                "policy=prefix_aware is using the ByteChunkTokenizer fallback (SWIFTSERVE_TOKENIZER unset). "
+                "Its block boundaries do NOT match the engine's, so cache predictions will be "
+                "systematically wrong. Set SWIFTSERVE_TOKENIZER=%s for real predictions.",
+                settings.model_name,
+            )
+        return built
+    return POLICIES[name]()
+
+
+policy: Policy = _build_policy(settings.policy)
 admission = AdmissionController(max_in_flight=settings.admission_max_in_flight)
 
 # Observability (see swiftserve/events.py and telemetry.py): a bounded in-process
@@ -192,6 +208,35 @@ register_dashboard(
     stop_event=lambda: _scrape_stop_event,  # looked up at use time: lifespan replaces it on each startup
     started_wall=_started_wall,
 )
+
+
+class PolicySwitch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+
+
+@app.post("/api/policy", dependencies=[Depends(_require_api_token)])
+async def switch_policy(body: PolicySwitch):
+    """Replace the routing policy with a fresh instance of ``name`` (empty prefix index / trie).
+
+    Disabled unless SWIFTSERVE_ALLOW_POLICY_SWITCH is set. Refused while any request is in
+    flight so no request is routed half by one policy and half by another. It changes which
+    existing policy runs; it adds no routing logic of its own."""
+    global policy
+    if not settings.allow_policy_switch:
+        raise HTTPException(status_code=403, detail="policy switching is disabled (set SWIFTSERVE_ALLOW_POLICY_SWITCH=1)")
+    if body.name not in POLICIES:
+        raise HTTPException(status_code=400, detail=f"unknown policy {body.name!r}; choose from {list(POLICIES)}")
+    in_flight = admission.status().get("in_flight", 0) if hasattr(admission, "status") else 0
+    if in_flight:
+        raise HTTPException(status_code=409, detail=f"{in_flight} request(s) in flight; wait until they finish")
+    previous = policy.name
+    for r in replicas:
+        r.reset_learned_state()  # every policy starts from the same knowledge of the replicas
+    policy = _build_policy(body.name)
+    bus.emit("policy.changed", None, **{"from": previous, "to": policy.name})
+    logger.info("routing policy switched: %s -> %s", previous, policy.name)
+    return {"policy": policy.name, "previous": previous}
 
 
 def _take_decision(p: object) -> dict | None:

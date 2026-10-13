@@ -39,6 +39,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from swiftserve.events import EventBus
+from swiftserve.policy import POLICIES
 from swiftserve.state import ReplicaState
 from swiftserve.telemetry import Telemetry
 
@@ -217,6 +218,7 @@ def build_snapshot(
             "note": "replicas are fake (no model, no GPU); every latency and token number is simulated"
             if getattr(s, "simulated", False)
             else "replicas are whatever SWIFTSERVE_REPLICAS points at; the router does not verify they are real GPUs",
+            "policy_switch": {"enabled": bool(getattr(s, "allow_policy_switch", False)), "policies": list(POLICIES)},
         },
         "router": {
             "policy": policy_state["name"],

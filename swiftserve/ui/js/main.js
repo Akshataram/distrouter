@@ -1,6 +1,7 @@
 // Page bootstrap: tabs, connection indicator, snapshot polling, event stream.
 
 import { ApiError, auth, getJSON, startEventStream } from "./api.js";
+import { initCompare } from "./compare.js";
 import { initDashboard } from "./dashboard.js";
 import { initLoadTest } from "./loadtest.js";
 import { initPlayground } from "./playground.js";
@@ -16,7 +17,7 @@ const replicaLabel = (rid) => {
 };
 const ctx = { store, replicaLabel };
 
-const TABS = [["playground", "Playground", initPlayground], ["loadtest", "Load test", initLoadTest], ["routing", "Live routing", initRouting], ["dashboard", "Dashboard", initDashboard]];
+const TABS = [["playground", "Playground", initPlayground], ["loadtest", "Load test", initLoadTest], ["compare", "Compare", initCompare], ["routing", "Live routing", initRouting], ["dashboard", "Dashboard", initDashboard]];
 const views = {};
 
 function buildTabs() {
