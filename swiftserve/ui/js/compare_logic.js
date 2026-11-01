@@ -60,8 +60,51 @@ export function buildWorkload({ n, tenants, tokens, namespace, seed, questions =
 
 export const tenantSequence = (opts) => buildWorkload(opts).map((r) => r.tenant);
 
+// A request counts as "cold" when less than this share of its prompt came from the engine's cache.
+export const COLD_BELOW = 0.5;
+const BLOCK = 16;   // vLLM block size: a prediction within one block of the engine's count is "close"
+
+// Metrics that measure the MECHANISM (prefill work skipped), not just the outcome. All of them are derived
+// from fields the router already measures per request (prompt_tokens and cached_tokens from vLLM's usage,
+// TTFT from the router's stream timer, the policy's predicted_cached_tokens); nothing new is instrumented.
+//   `meta(r)` returns {tenant, index} for a request record, or null; it lets us tell an unavoidable first
+//   request of a tenant apart from a later request that missed a cache that existed.
+export function mechanismMetrics(withUsage, meta = null) {
+  const ttftOf = (r) => r.server.ttft_ms;
+  const frac = (r) => r.server.cached_tokens / r.server.prompt_tokens;
+  const recomputed = withUsage.map((r) => r.server.prompt_tokens - r.server.cached_tokens);
+  const hit = withUsage.filter((r) => frac(r) >= COLD_BELOW), miss = withUsage.filter((r) => frac(r) < COLD_BELOW);
+
+  // cold requests AFTER each tenant's first request (the first one is cold for every policy)
+  let coldAfterWarmup = null, warmupDenominator = null;
+  if (meta) {
+    const seen = new Set();
+    const ordered = withUsage.map((r) => ({ r, m: meta(r) })).filter((x) => x.m).sort((a, b) => a.m.index - b.m.index);
+    let cold = 0, counted = 0;
+    for (const { r, m } of ordered) {
+      if (!seen.has(m.tenant)) { seen.add(m.tenant); continue; }
+      counted++;
+      if (frac(r) < COLD_BELOW) cold++;
+    }
+    coldAfterWarmup = cold; warmupDenominator = counted;
+  }
+
+  // how well the router's belief matched the engine's report (only policies that predict)
+  const pred = withUsage.filter((r) => r.server.predicted !== null && r.server.predicted !== undefined);
+  const errs = pred.map((r) => Math.abs(r.server.predicted - r.server.cached_tokens));
+  return {
+    recomputed_avg: mean(recomputed), recomputed_total: recomputed.reduce((a, b) => a + b, 0),
+    hit_count: hit.length, miss_count: miss.length,
+    ttft_hit_p50: percentile(hit.map(ttftOf), 50), ttft_miss_p50: percentile(miss.map(ttftOf), 50),
+    cold_after_warmup: coldAfterWarmup, warmup_denominator: warmupDenominator,
+    pred_count: pred.length,
+    pred_mae_tokens: errs.length ? mean(errs) : null,
+    pred_within_block: errs.length ? errs.filter((e) => e <= BLOCK).length / errs.length : null,
+  };
+}
+
 // Per-policy summary from the store's request records (router-measured values).
-export function summarize(reqs) {
+export function summarize(reqs, meta = null) {
   const done = reqs.filter((r) => r.server.state === "completed");
   const failed = reqs.filter((r) => r.server.state === "failed" || r.server.state === "rejected" || (r.client && r.client.status === "error")).length;
   const ttft = done.map((r) => r.server.ttft_ms);
@@ -78,6 +121,7 @@ export function summarize(reqs) {
     avg_prompt_tokens: withUsage.length ? promptTok / withUsage.length : null,
     per_replica: perReplica,
     spread: counts.length ? Math.max(...counts) / (counts.reduce((a, b) => a + b, 0) / counts.length) : null,
+    ...mechanismMetrics(withUsage, meta),
   };
 }
 
