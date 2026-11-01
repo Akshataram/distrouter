@@ -69,6 +69,8 @@ export function initCompare(root, ctx) {
     const work = buildWorkload({ n: cfg.n, tenants: cfg.tenants, tokens: cfg.tokens, namespace: `${runId}-${policy}`, seed: cfg.seed });
     const inflight = new Set();
     let next = 0;
+    const tenantOfLabel = new Map(work.map((w) => [`${policy} #${w.index + 1}`, { tenant: w.tenant, index: w.index }]));
+    const startedAt = performance.now();
     run.current = { policy, launched: 0, settled: 0, total: work.length };
     const launch = async (item) => {
       const id = uid("cmp");
@@ -91,10 +93,12 @@ export function initCompare(root, ctx) {
       const p = launch(work[next++]); inflight.add(p); p.finally(() => inflight.delete(p));
     }
     await Promise.all([...inflight]);
+    const wallS = (performance.now() - startedAt) / 1000;   // first request launched -> last one finished
     if (stop.aborted) return;
     await sleep(900);                                   // let the router's final events arrive
     const reqs = requestsOf(key);
-    run.results[policy] = summarize(reqs);
+    const summary = summarize(reqs, (r) => tenantOfLabel.get(r.label) || null);
+    run.results[policy] = { ...summary, wall_s: wallS, req_per_s: summary.completed ? summary.completed / wallS : null };
     // one row per request, so a slow tail can be traced to the replica and routing path that caused it
     run.rows[policy] = reqs.map((r) => ({ request: r.label, state: r.server.state, selected: r.server.selected, served: r.server.served, path: r.server.path,
       ttft_ms: r.server.ttft_ms, total_ms: r.server.total_ms, prompt_tokens: r.server.prompt_tokens, cached_tokens: r.server.cached_tokens, predicted_cached_tokens: r.server.predicted }));
@@ -150,10 +154,26 @@ export function initCompare(root, ctx) {
     }
     const R = run.results;
     const best = (k, dir) => { const xs = names.filter((n) => R[n][k] !== null && R[n][k] !== undefined); if (xs.length < 2) return null; return xs.slice().sort((a, b) => dir * (R[a][k] - R[b][k]))[0]; };
-    const bests = { ttft_p50: best("ttft_p50", 1), ttft_p95: best("ttft_p95", 1), cache_reuse: best("cache_reuse", -1), spread: best("spread", 1) };
+    for (const n of names) {   // derived rate so "cold requests after warm-up" can be ranked
+      const s = R[n];
+      s.cold_rate = s.warmup_denominator ? s.cold_after_warmup / s.warmup_denominator : null;
+    }
+    const bests = { ttft_p50: best("ttft_p50", 1), ttft_p95: best("ttft_p95", 1), cache_reuse: best("cache_reuse", -1), spread: best("spread", 1),
+                    recomputed_avg: best("recomputed_avg", 1), ttft_hit_p50: best("ttft_hit_p50", 1), ttft_miss_p50: best("ttft_miss_p50", 1),
+                    cold_rate: best("cold_rate", 1), req_per_s: best("req_per_s", -1), pred_mae_tokens: best("pred_mae_tokens", 1) };
+    const num = (v, d = 1) => (v === null || v === undefined ? "n/a" : v.toFixed(d));
     const rows = [
       ["TTFT median", "ttft_p50", (v) => fmtMs(v)], ["TTFT 95th percentile", "ttft_p95", (v) => fmtMs(v)], ["Prompt reused from cache", "cache_reuse", (v) => fmtPct(v)],
       ["Load balance (busiest ÷ average)", "spread", (v) => (v === null ? "n/a" : v.toFixed(2))], ["ITL mean", "itl_mean", (v) => fmtMs(v, 1)],
+    ];
+    // Mechanism metrics: what the cache actually saved, and where requests still paid the full price.
+    const mechanism = [
+      ["Prompt tokens computed per request", "recomputed_avg", (v) => num(v, 0)],
+      ["TTFT median, requests that hit the cache", "ttft_hit_p50", (v) => fmtMs(v)],
+      ["TTFT median, requests that missed it", "ttft_miss_p50", (v) => fmtMs(v)],
+      ["Cold requests after each tenant's first", "cold_rate", (v, s) => (v === null ? "n/a" : `${s.cold_after_warmup} of ${s.warmup_denominator}`)],
+      ["Requests per second (whole run)", "req_per_s", (v) => num(v, 2)],
+      ["Router's cache prediction, average error", "pred_mae_tokens", (v, s) => (v === null ? "n/a" : `${v.toFixed(0)} tokens (${fmtPct(s.pred_within_block)} within 16)`)],
     ];
     const v = verdict(R);
     const maxTtft = Math.max(...names.map((n) => R[n].ttft_p50 || 0), 1);
@@ -161,8 +181,11 @@ export function initCompare(root, ctx) {
       h("table", { class: "grid" }, h("thead", {}, h("tr", {}, h("th", {}, ""), ...names.map((n) => h("th", { class: "num" }, LABEL[n])))),
         h("tbody", {},
           ...rows.map(([label, key, f]) => h("tr", {}, h("th", { scope: "row" }, label),
-            ...names.map((n) => h("td", { class: "num" + (bests[key] === n ? " best" : "") }, f(R[n][key]))))),
-          h("tr", {}, h("th", { scope: "row" }, "Completed / failed"), ...names.map((n) => h("td", { class: "num" }, `${R[n].completed} / ${R[n].failed}`))))),
+            ...names.map((n) => h("td", { class: "num" + (bests[key] === n ? " best" : "") }, f(R[n][key], R[n]))))),
+          h("tr", {}, h("th", { scope: "row" }, "Completed / failed"), ...names.map((n) => h("td", { class: "num" }, `${R[n].completed} / ${R[n].failed}`))),
+          h("tr", { class: "group" }, h("th", { colspan: names.length + 1, scope: "colgroup" }, "What the cache saved (measured per request)")),
+          ...mechanism.map(([label, key, f]) => h("tr", {}, h("th", { scope: "row" }, label),
+            ...names.map((n) => h("td", { class: "num" + (bests[key] === n ? " best" : "") }, f(R[n][key], R[n]))))))),
       h("div", { class: "cmpbars" }, h("div", { class: "muted small" }, "Median time to first token"),
         ...names.map((n) => h("div", { class: "cmprow" }, h("span", { class: "cmplabel" }, LABEL[n]), bar((R[n].ttft_p50 || 0) / maxTtft, n === "prefix_aware" ? "var(--accent)" : "var(--muted)"), h("span", { class: "cmpval" }, fmtMs(R[n].ttft_p50))))),
       v ? h("p", { class: "verdict" },

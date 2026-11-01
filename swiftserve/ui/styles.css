@@ -59,6 +59,7 @@ button[disabled] { opacity: .5; cursor: not-allowed; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 table.grid thead th { color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
+table.grid tr.group th { text-align: left; color: var(--muted); font-size: 12px; font-weight: 600; padding-top: 14px; border-bottom: 1px solid var(--line, #d8dde6); }
 table.grid td { white-space: nowrap; } table.grid td.why, table.grid td.note, td.ans { white-space: normal; }
 td.ans { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 td.num { text-align: right; font-family: var(--mono); } tr.selected { background: var(--info-bg); } tr.rowbad td { color: var(--bad); }
