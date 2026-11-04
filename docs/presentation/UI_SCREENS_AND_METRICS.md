@@ -169,3 +169,42 @@ Also: **bar chart** of median TTFT, a **plain-language verdict** built only from
 - **Live routing:** all replica dots are red, "circuit closed · queue 0", "last decision: none yet", and the health log shows "R3 colab-d T4 health up → down". **The circuit is closed even though the replica is down** because no request has been sent yet; the circuit counts failures of real requests.
 - **Load test:** defaults only, no run yet.
 - These screens are valid only for showing the layout; no results are in them.
+
+---
+
+## Part 9: Where each metric appears in the console
+
+Legend: **PG** = Playground, **LT** = Load test, **CMP** = Compare, **LR** = Live routing, **DB** = Dashboard. "JSON" = visible in `/api/dashboard` or an export file, but not drawn on screen.
+
+| Metric | Where it is shown, and under which heading |
+|---|---|
+| **TTFT** | PG: *Result* → "TTFT", the *Requests* table, *All details* → Latency (router and browser view). LT: *Summary* → "TTFT p50 / p95", *Every request* → "TTFT". CMP: main table "TTFT median" and "TTFT 95th percentile", the median bar chart, and the "TTFT median, requests that hit / missed the cache" rows. LR: the *Timeline* (the "waiting for first token" segment ends at it). DB: replica card "TTFT p50". |
+| **ITL (mean)** | PG: *Result* → "ITL (mean)". LT: *Summary* → "ITL mean". CMP: main table "ITL mean". DB: replica card "ITL mean". |
+| **TPOT** | PG: *All details* → Latency only. |
+| **Total latency** | PG: *Result* → "Total", *Requests* table, *All details*. LT: *Every request* → "Total". LR: *Timeline* (bar length). CMP: only in Export JSON. |
+| **Upstream time** | PG: *All details* → Latency only. |
+| **TTFB** | Not drawn. Recorded in the router's events (JSON). |
+| **p50 / p95** | LT *Summary*, CMP main table, DB (p50 only). |
+| **Prompt tokens, completion tokens** | PG: *All details* → Tokens. LT: *Every request* → "Cached / prompt tokens", Export JSON/CSV. CMP: Export JSON. |
+| **Cached tokens** | PG: *Result* → "Reused from cache" ("X of Y prompt tokens"). LT: *Every request* → "Cached / prompt tokens". |
+| **Prompt reused from cache (%)** | LT: *Summary* → "prompt reused from cache". CMP: main table. DB: replica card "reused from cache". |
+| **Prompt tokens computed per request** | CMP: "What the cache saved" section. |
+| **TTFT for cache hits / misses** | CMP: "What the cache saved" section. |
+| **Cold requests after each tenant's first** | CMP: "What the cache saved" section. |
+| **Router's predicted cached tokens** | PG: *Result* → "Router predicted", *All details* → Tokens (with the error). CMP: "Router's cache prediction, average error". LT: Export only. |
+| **Load balance (busiest ÷ average)** | CMP: main table and the *Requests per replica* table (raw counts). LT: *Where the requests went* (bars). LR: line thickness (share of decisions since the router started). |
+| **Selected / served** | LR: replica box "selected N · served N", and the decision table. LT: *Where the requests went*. DB: card "served". CMP: *Requests per replica*. PG: *Result* → "Served by"; *All details* → Selected / Dispatched / Served. |
+| **Failed** | LT: *Progress* → "failed", the *Every request* table. CMP: "Completed / failed". DB: the "failed" tile and card. |
+| **In flight** | DB: "in flight now" tile and card "in flight". LR: the big number in each replica box, and Admission "in flight N / max 256". PG: *All details* → candidate table "In flight". |
+| **Queue depth** | LR: replica box "queue N". PG: *All details* → candidate table "Queue". |
+| **Estimated latency, batch capacity** | PG: *All details* → candidate table "Est. latency" and "Capacity". JSON only elsewhere (`/api/dashboard`). |
+| **req/s** | DB: tile (last 30 s). LT: *Progress* → "req/s". CMP: "Requests per second (whole run)". |
+| **tokens/s** | DB: tile (last 30 s). LT: *Summary* → "tokens/s". |
+| **GPU name, utilisation, VRAM, temperature** | DB: replica cards. (The replica box on LR shows only your label.) |
+| **Running / waiting requests, KV-cache usage, engine prefix hit rate** | DB: *Router settings and what is measured* → "What is and is not measured" shows only whether each is measured. The values are in `/api/dashboard` JSON and the router's `/metrics`, not drawn. |
+| **Healthy / unreachable** | DB: card badge. LR: replica health dot, and *Replica health changes*. PG: candidate table "Health". |
+| **Circuit state** | LR: replica box "circuit …". DB: card badge (shown only when not closed). PG: candidate table "Circuit". |
+| **Path and Why** | PG: *Result* → "Why", *All details* → Routing decision. LR: *Recent routing decisions*. LT: Export only. |
+| **SLA** | PG: the "SLA ms" field. DB: settings "default SLA". LR: policy box "SLA default". **SLA violated** is only in the router's Prometheus metric, not in the console. |
+| **Admission** | LR: box 1. DB: settings "admission". |
+| **Policy state** (index blocks, tokenizer, thresholds, namespace, trie nodes, session TTL) | DB: *Router settings*. LR: the policy box (a short version). |
